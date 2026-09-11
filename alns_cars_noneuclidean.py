@@ -251,13 +251,27 @@ class CarRenterProblem:
         # Sin esto el DP podia terminar con 1 solo vehiculo para toda la
         # ruta (degenerando al TSP clasico, thesis Fig. 7) en vez de
         # resolver el mismo problema "exato" que el resto del proyecto.
-        full_mask = max_mask - 1
-        if L < self.num_vehiculos or dp[L][full_mask] == float('inf'):
+        #------------------------------------------
+        # full_mask = max_mask - 1
+        # if L < self.num_vehiculos or dp[L][full_mask] == float('inf'):
+        #     return float('inf'), [], set(), []
+
+        # mejor_costo = dp[L][full_mask]
+        # mejor_mask = full_mask
+        #-----------------------------
+        # Sin restriccion de "usar todos los vehiculos": elegir libremente
+        # el subconjunto de vehiculos que minimice el costo total.
+        mejor_costo = float('inf')
+        mejor_mask = None
+        for m in range(max_mask):
+            if dp[L][m] < mejor_costo:
+                mejor_costo = dp[L][m]
+                mejor_mask = m
+
+        if mejor_mask is None or mejor_costo == float('inf'):
             return float('inf'), [], set(), []
 
-        mejor_costo = dp[L][full_mask]
-        mejor_mask = full_mask
-
+        
         vehiculos_por_arco = [None] * L
         puntos_cambio = []
         pos = L
