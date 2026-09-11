@@ -65,20 +65,21 @@ class CarRenterProblem:
             return self.costo_arco_cache[key]
 
     def costo_retorno(self, ciudad_alquiler, ciudad_devolucion, v):
-        """d^k_ij de la tesis (Silva 2011, p.44 item 3): costo de devolver
-        el vehiculo v, ALQUILADO en ciudad_alquiler, ENTREGADO en
-        ciudad_devolucion. Nulo cuando coinciden (thesis p.44 item 5)."""
-        if ciudad_alquiler == ciudad_devolucion:
-            return 0.0
-        if self.return_rate is None:
-            return 0.0
-        if self.formato == "FULL_MATRIX":
-            return float(self.return_rate[v][ciudad_alquiler][ciudad_devolucion])
-        else:
-            ri = self.return_rate[v][ciudad_alquiler]
-            rj = self.return_rate[v][ciudad_devolucion]
-            dist_ij = self.dist[ciudad_alquiler][ciudad_devolucion]
-            return float((2 * ri + 3 * rj) / 3.0 + dist_ij)
+        # """d^k_ij de la tesis (Silva 2011, p.44 item 3): costo de devolver
+        # el vehiculo v, ALQUILADO en ciudad_alquiler, ENTREGADO en
+        # ciudad_devolucion. Nulo cuando coinciden (thesis p.44 item 5)."""
+        # if ciudad_alquiler == ciudad_devolucion:
+        #     return 0.0
+        # if self.return_rate is None:
+        #     return 0.0
+        # if self.formato == "FULL_MATRIX":
+        #     return float(self.return_rate[v][ciudad_alquiler][ciudad_devolucion])
+        # else:
+        #     ri = self.return_rate[v][ciudad_alquiler]
+        #     rj = self.return_rate[v][ciudad_devolucion]
+        #     dist_ij = self.dist[ciudad_alquiler][ciudad_devolucion]
+        #     return float((2 * ri + 3 * rj) / 3.0 + dist_ij)
+        return 0.0
 
     # ------------------------------------------------------------
     # CÁLCULO EXACTO DEL COSTO ESPERADO (FUERZA BRUTA) CON VEHÍCULOS
