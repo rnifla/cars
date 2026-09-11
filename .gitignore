@@ -1,0 +1,14 @@
+# Ignore everything by default...
+*
+
+# ...except the files we actually want in the repo.
+!.gitignore
+!README.md
+!aco_cars_ptsp_exact_noneuclidean.py
+!aco_cars_ptsp_exact_euclidean.py
+!alns_cars_noneuclidean.py
+!alns_cars_euclidean.py
+
+# ...and the whole instances/ folder (euclidean + noneuclidean .car files).
+!instances/
+!instances/**
