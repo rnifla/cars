@@ -865,7 +865,9 @@ class ALNSSolver:
         costo, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(ruta)
         if not vehiculos:
             return float('inf')
-        return costo
+        #return costo
+        costo_esp, _, _, _ = self.problema.calcular_esperanza_formula_con_vehiculos(ruta, vehiculos)
+        return costo_esp                      # ← devuelve ESPERADO
 
     # Operadores de destrucción y reparación (sin cambios, igual que antes)
     def destruir_random(self, ruta):
