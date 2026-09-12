@@ -252,26 +252,14 @@ class CarRenterProblem:
         # ruta (degenerando al TSP clasico, thesis Fig. 7) en vez de
         # resolver el mismo problema "exato" que el resto del proyecto.
         #------------------------------------------
-        # full_mask = max_mask - 1
-        # if L < self.num_vehiculos or dp[L][full_mask] == float('inf'):
-        #     return float('inf'), [], set(), []
+        full_mask = max_mask - 1
+        if L < self.num_vehiculos or dp[L][full_mask] == float('inf'):
+                return float('inf'), [], set(), []
 
-        # mejor_costo = dp[L][full_mask]
-        # mejor_mask = full_mask
+        mejor_costo = dp[L][full_mask]
+        mejor_mask = full_mask
         #-----------------------------
-        # Sin restriccion de "usar todos los vehiculos": elegir libremente
-        # el subconjunto de vehiculos que minimice el costo total.
-        mejor_costo = float('inf')
-        mejor_mask = None
-        for m in range(max_mask):
-            if dp[L][m] < mejor_costo:
-                mejor_costo = dp[L][m]
-                mejor_mask = m
-
-        if mejor_mask is None or mejor_costo == float('inf'):
-            return float('inf'), [], set(), []
-
-        
+       
         vehiculos_por_arco = [None] * L
         puntos_cambio = []
         pos = L
@@ -1282,7 +1270,7 @@ class CarsGUI:
         frame_params.pack(fill=tk.X, padx=10, pady=5)
         ttk.Label(frame_params, text="Iteraciones:").grid(row=0, column=0, sticky=tk.W)
         self.entry_iter = ttk.Entry(frame_params, width=10)
-        self.entry_iter.insert(0, "5000")
+        self.entry_iter.insert(0, "500")
         self.entry_iter.grid(row=0, column=1, padx=5)
         ttk.Label(frame_params, text="Temperatura inicial:").grid(row=0, column=2, sticky=tk.W)
         self.entry_temp = ttk.Entry(frame_params, width=10)
@@ -1793,7 +1781,7 @@ class CarsGUI:
         self.lbl_tiempo_total.config(text=f"Tiempo total de ejecución: {tiempo_total:.2f} s")
         self.lbl_estado.config(text=f"Finalizado - Determinístico: {mejor_costo_det:.6f}")
 
-        # Mostrar ruta
+        # Mostrar ruta -++++
         if mejor_ruta and vehiculos_opt:
             tramos = {}
             v_actual = vehiculos_opt[0] if vehiculos_opt else None

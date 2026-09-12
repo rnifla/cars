@@ -101,24 +101,14 @@ class CarRenterProblem:
         # Variante "exato" (Silva 2011 thesis, p.48, section 3.3 item 3),
         # la misma que aco_cars_ptsp_exact_noneuclidean.py / aco_cars_ptsp_exact_euclidean.py /
         # alns_cars_noneuclidean.py: los num_vehiculos vehiculos deben usarse TODOS.
-        # full_mask = max_mask - 1
-        # if L < self.num_vehiculos or dp[L][full_mask] == float('inf'):
-        #     return float('inf'), [], set(), []
-
-        # mejor_costo = dp[L][full_mask]
-        # mejor_mask = full_mask
-
-        mejor_costo = float('inf')
-        mejor_mask = None
-        for m in range(max_mask):
-            if dp[L][m] < mejor_costo:
-                mejor_costo = dp[L][m]
-                mejor_mask = m
-
-        if mejor_mask is None or mejor_costo == float('inf'):
+        full_mask = max_mask - 1
+        if L < self.num_vehiculos or dp[L][full_mask] == float('inf'):
             return float('inf'), [], set(), []
 
+        mejor_costo = dp[L][full_mask]
+        mejor_mask = full_mask
 
+  
         vehiculos_por_arco = [None] * L
         puntos_cambio = []
 
@@ -251,6 +241,30 @@ class CarRenterProblem:
                     v = vehiculos[pos_b - 1]
                 costo += self.costo_arco_sin_retorno(a, b, v)
             total += prob * costo
+        return total
+
+    def costo_determinista_con_asignacion(self, ruta, vehiculos):
+        """Costo determinista (arcos + retorno) para una asignacion de
+        vehiculos DADA por el usuario -- no necesariamente la optima ni
+        "exato"/"sem repeticao". Cada tramo contiguo del mismo vehiculo
+        paga UN costo de retorno al cerrarse (por cambio de vehiculo o al
+        terminar la ruta), igual que verify_cost() en
+        aco_cars_ptsp_exact_noneuclidean.py / aco_cars_ptsp_exact_euclidean.py."""
+        total = 0.0
+        n_arcs = len(ruta) - 1
+        block_start_idx = 0
+
+        for t in range(n_arcs):
+            i, j, v = ruta[t], ruta[t + 1], vehiculos[t]
+            total += self.costo_arco_sin_retorno(i, j, v)
+
+            is_last_arc = t == n_arcs - 1
+            switches_next = (not is_last_arc) and vehiculos[t + 1] != v
+            if switches_next or is_last_arc:
+                origen = ruta[block_start_idx]
+                total += self.costo_retorno(origen, j, v)
+                block_start_idx = t + 1
+
         return total
 
     def costo_variable_ruta(self, segmento):
@@ -1104,7 +1118,7 @@ class CarsUnificadoGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("CaRS Solver (OBJETIVO: ESPERANZA S-CARS)")
-        self.root.geometry("950x900")
+        self.root.geometry("1000x950")
         self.problem = None
         self.solver = None
         self.coordenadas = None
@@ -1119,11 +1133,28 @@ class CarsUnificadoGUI:
         self.var_usar_estanc_iter = tk.BooleanVar(value=True)
         self.var_usar_estanc_tiempo = tk.BooleanVar(value=True)
         self.var_mostrar_vehiculos = tk.BooleanVar(value=False)  # desmarcado por defecto
+
+        # Notebook con 2 pestañas: Solver y Evaluador de Ruta.
+        # Se usa para poder ingresar una ruta manual y calcular sus costos
+        # (formula esperada + fuerza bruta + determinista) de manera
+        # independiente a la busqueda del ALNS.
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Pestaña 1: Solver ALNS
+        self.frame_solver = ttk.Frame(self.notebook)
+        self.notebook.add(self.frame_solver, text="Solver")
+
+        # Pestaña 2: Evaluador de ruta manual
+        self.frame_evaluador = ttk.Frame(self.notebook)
+        self.notebook.add(self.frame_evaluador, text="Evaluador de Ruta")
+
         self.create_widgets()
+        self._create_evaluador_widgets()
 
     def create_widgets(self):
         # --- Frame 1: Carga ---
-        frame_top = ttk.LabelFrame(self.root, text="1. Cargar instancia CaRS", padding=5)
+        frame_top = ttk.LabelFrame(self.frame_solver, text="1. Cargar instancia CaRS", padding=5)
         frame_top.pack(fill=tk.X, padx=10, pady=5)
         row1 = ttk.Frame(frame_top)
         row1.pack(fill=tk.X)
@@ -1138,7 +1169,7 @@ class CarsUnificadoGUI:
         self.chk_mostrar_grafico.pack(side=tk.LEFT, padx=5)
 
         # --- Frame 2: Parámetros ALNS ---
-        frame_params = ttk.LabelFrame(self.root, text="2. Parámetros ALNS", padding=5)
+        frame_params = ttk.LabelFrame(self.frame_solver, text="2. Parámetros ALNS", padding=5)
         frame_params.pack(fill=tk.X, padx=10, pady=5)
         ttk.Label(frame_params, text="Iteraciones:").grid(row=0, column=0, sticky=tk.W)
         self.entry_iter = ttk.Entry(frame_params, width=10)
@@ -1158,7 +1189,7 @@ class CarsUnificadoGUI:
         self.entry_destr.grid(row=1, column=3, padx=5)
 
         # --- Estancamiento ---
-        frame_estanc = ttk.LabelFrame(self.root, text="Criterios de estancamiento (opcionales)", padding=5)
+        frame_estanc = ttk.LabelFrame(self.frame_solver, text="Criterios de estancamiento (opcionales)", padding=5)
         frame_estanc.pack(fill=tk.X, padx=10, pady=5)
         f1 = ttk.Frame(frame_estanc)
         f1.pack(fill=tk.X, pady=2)
@@ -1180,7 +1211,7 @@ class CarsUnificadoGUI:
         self.entry_estanc_tiempo.pack(side=tk.LEFT, padx=5)
 
         # --- Controles ---
-        frame_controls = ttk.LabelFrame(self.root, text="3. Control", padding=5)
+        frame_controls = ttk.LabelFrame(self.frame_solver, text="3. Control", padding=5)
         frame_controls.pack(fill=tk.X, padx=10, pady=5)
         self.btn_run = ttk.Button(frame_controls, text="▶ Ejecutar", command=self.ejecutar)
         self.btn_run.pack(side=tk.LEFT, padx=5)
@@ -1204,7 +1235,7 @@ class CarsUnificadoGUI:
         self.chk_mostrar_vehiculos.pack(side=tk.LEFT, padx=5)
 
         # --- Información ---
-        frame_info = ttk.LabelFrame(self.root, text="4. Mejor solución encontrada (objetivo: esperanza)", padding=5)
+        frame_info = ttk.LabelFrame(self.frame_solver, text="4. Mejor solución encontrada (objetivo: esperanza)", padding=5)
         frame_info.pack(fill=tk.X, padx=10, pady=5)
         self.lbl_mejor_costo = ttk.Label(frame_info, text="Costo esperado (S-CARS): --", font=("Arial", 10, "bold"))
         self.lbl_mejor_costo.pack(anchor=tk.W)
@@ -1224,7 +1255,7 @@ class CarsUnificadoGUI:
         self.lbl_estado.pack(anchor=tk.W)
 
         # --- Log ---
-        frame_result = ttk.LabelFrame(self.root, text="5. Log de mejoras (esperanza)", padding=5)
+        frame_result = ttk.LabelFrame(self.frame_solver, text="5. Log de mejoras (esperanza)", padding=5)
         frame_result.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.txt_result = tk.Text(frame_result, wrap=tk.WORD, height=15)
         scroll = ttk.Scrollbar(frame_result, orient=tk.VERTICAL, command=self.txt_result.yview)
@@ -1232,8 +1263,68 @@ class CarsUnificadoGUI:
         self.txt_result.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.lbl_status = ttk.Label(self.root, text="Estado: Esperando acción")
+        self.lbl_status = ttk.Label(self.frame_solver, text="Estado: Esperando acción")
         self.lbl_status.pack(pady=5)
+
+    def _create_evaluador_widgets(self):
+        """Pestaña 'Evaluador de Ruta': permite ingresar manualmente una ruta
+        y (opcionalmente) la asignacion de vehiculos por arco, y calcular:
+        - Costo esperado con la formula cerrada PTSP.
+        - Costo esperado con fuerza bruta (validacion).
+        - Costo determinista (arcos + retorno).
+        Se muestran por separado el optimo (via DP) y lo ingresado por el
+        usuario, ademas de la diferencia entre ambos."""
+        frame_carga = ttk.LabelFrame(self.frame_evaluador, text="Cargar instancia", padding=5)
+        frame_carga.pack(fill=tk.X, padx=10, pady=5)
+
+        self.btn_cargar_eval = ttk.Button(frame_carga, text="Seleccionar archivo", command=self.cargar_archivo_eval)
+        self.btn_cargar_eval.pack(side=tk.LEFT, padx=5)
+        self.lbl_file_eval = ttk.Label(frame_carga, text="Ningún archivo cargado")
+        self.lbl_file_eval.pack(side=tk.LEFT, padx=10)
+
+        frame_calculo = ttk.LabelFrame(self.frame_evaluador, text="Ingrese ruta y vehículos", padding=10)
+        frame_calculo.pack(fill=tk.X, padx=10, pady=5)
+
+        ttk.Label(frame_calculo, text="Ruta (números separados por espacios, ej: 0 5 8 6 ... 0):").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.entry_ruta = ttk.Entry(frame_calculo, width=60)
+        self.entry_ruta.grid(row=0, column=1, padx=10, pady=5, sticky=tk.W)
+
+        ttk.Label(frame_calculo, text="Vehículos por arco (opcional, ej: 1 1 1 0 0 ...):").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.entry_vehiculos = ttk.Entry(frame_calculo, width=60)
+        self.entry_vehiculos.grid(row=1, column=1, padx=10, pady=5, sticky=tk.W)
+
+        self.btn_calcular = ttk.Button(frame_calculo, text="Calcular costos",
+                                       command=self.evaluar_ruta_manual, state=tk.DISABLED)
+        self.btn_calcular.grid(row=2, column=1, pady=10, sticky=tk.W)
+
+        # Área de resultados del evaluador
+        self.lbl_ruta_evaluada  = ttk.Label(frame_calculo, text="Ruta evaluada: --", font=("Arial", 10))
+        self.lbl_ruta_evaluada.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=2)
+
+        self.lbl_esperanza_opt  = ttk.Label(frame_calculo, text="Costo esperado (óptimo): --", font=("Arial", 10, "bold"))
+        self.lbl_esperanza_opt.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=2)
+
+        self.lbl_asignacion_opt = ttk.Label(frame_calculo, text="Asignación óptima de vehículos: --")
+        self.lbl_asignacion_opt.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=2)
+
+        self.lbl_costo_det_opt  = ttk.Label(frame_calculo, text="Costo determinístico (óptimo): --")
+        self.lbl_costo_det_opt.grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=2)
+
+        self.lbl_esperanza_ing  = ttk.Label(frame_calculo, text="Costo esperado (ingresado): --")
+        self.lbl_esperanza_ing.grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=2)
+
+        self.lbl_costo_det_ing  = ttk.Label(frame_calculo, text="Costo determinístico (ingresado): --")
+        self.lbl_costo_det_ing.grid(row=8, column=0, columnspan=3, sticky=tk.W, pady=2)
+
+        self.lbl_diff           = ttk.Label(frame_calculo, text="Diferencia (ingresado - óptimo): --")
+        self.lbl_diff.grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=2)
+
+        self.lbl_tiempo_eval    = ttk.Label(frame_calculo, text="Tiempo de cálculo: --")
+        self.lbl_tiempo_eval.grid(row=10, column=0, columnspan=3, sticky=tk.W, pady=2)
+
+        self.lbl_estado_eval    = ttk.Label(frame_calculo, text="Cargue una instancia para habilitar el cálculo.",
+                                            foreground="gray")
+        self.lbl_estado_eval.grid(row=11, column=0, columnspan=3, sticky=tk.W, pady=10)
 
     # ==================== MÉTODOS DE LA INTERFAZ ====================
     def cargar_archivo(self):
@@ -1243,22 +1334,172 @@ class CarsUnificadoGUI:
             filetypes=[("Archivos CaRS", "*.car *.cars"), ("Todos los archivos", "*.*")]
         )
         if archivo:
+            self._cargar_instancia(archivo, actualizar_eval=False)
+
+    def cargar_archivo_eval(self):
+        """Carga una instancia desde la pestaña del evaluador. Es la misma
+        logica que cargar_archivo(), pero ademas habilita el boton de
+        calculo y actualiza la etiqueta del evaluador."""
+        archivo = filedialog.askopenfilename(
+            title="Seleccionar archivo de instancia CaRS",
+            initialdir="instances/euclidean",
+            filetypes=[("Archivos CaRS", "*.car *.cars"), ("Todos los archivos", "*.*")]
+        )
+        if archivo:
+            self._cargar_instancia(archivo, actualizar_eval=True)
+
+    def _cargar_instancia(self, archivo, actualizar_eval=False):
+        """Carga la instancia una sola vez y actualiza las dos pestañas
+        segun corresponda. `actualizar_eval` controla si ademas se debe
+        habilitar el boton 'Calcular costos' del evaluador."""
+        try:
+            dist_matrix, edge_arr, return_arr, n, nv, coords, nombre, probs = cargar_instancia_cars(archivo)
+            self.coordenadas = coords
+            self.probabilidades = probs
+            self.problem = CarRenterProblem(n, dist_matrix, edge_arr, return_arr)
+            self.problem.nombre_instancia = nombre
+            self.problem.ruta_instancia = archivo
+            self.problem.probabilidades = probs
+            self.problem.coordenadas = coords
+            self.lbl_file.config(text=os.path.basename(archivo))
+            if actualizar_eval:
+                self.lbl_file_eval.config(text=os.path.basename(archivo))
+                self.btn_calcular.config(state=tk.NORMAL)
+                self.lbl_estado_eval.config(text="Instancia cargada. Ingrese ruta y vehículos (opcional).",
+                                            foreground="green")
+            messagebox.showinfo("Éxito", f"Instancia cargada: {n} ciudades, {nv} vehículos\n"
+                                          f"Probabilidades leídas: {len(probs)} valores")
+            if self.var_mostrar_grafico.get():
+                graficar_ciudades(coords, f"Distribución - {os.path.basename(archivo)}")
+            self.btn_run.config(state=tk.NORMAL)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo cargar el archivo:\n{str(e)}")
+
+    def evaluar_ruta_manual(self):
+        """Toma la ruta (y vehiculos opcionales) ingresados en la pestaña
+        Evaluador, valida los datos y calcula:
+          - Costo esperado optimo (formula + fuerza bruta) via DP.
+          - Costo determinista optimo (DP).
+          - Costo esperado y determinista de la asignacion ingresada.
+          - Diferencia entre la esperanza ingresada y la optima.
+        """
+        if self.problem is None:
+            messagebox.showwarning("Advertencia", "Primero cargue una instancia.")
+            return
+
+        texto_ruta = self.entry_ruta.get().strip()
+        if not texto_ruta:
+            messagebox.showwarning("Advertencia", "Ingrese una ruta.")
+            return
+        try:
+            ruta = list(map(int, texto_ruta.split()))
+        except ValueError:
+            messagebox.showerror("Error", "La ruta debe contener solo números enteros separados por espacios.")
+            return
+
+        if ruta[0] != 0 or ruta[-1] != 0:
+            messagebox.showerror("Error", "La ruta debe comenzar y terminar en 0 (depósito).")
+            return
+        n = self.problem.n
+        for c in ruta:
+            if c < 0 or c >= n:
+                messagebox.showerror("Error", f"Ciudad {c} fuera de rango (0..{n-1}).")
+                return
+        sin_deposito = ruta[1:-1]
+        if len(set(sin_deposito)) != len(sin_deposito):
+            messagebox.showerror("Error", "Hay ciudades duplicadas en la ruta.")
+            return
+
+        texto_veh = self.entry_vehiculos.get().strip()
+        vehiculos_ingresados = None
+        if texto_veh:
             try:
-                dist_matrix, edge_arr, return_arr, n, nv, coords, nombre, probs = cargar_instancia_cars(archivo)
-                self.coordenadas = coords
-                self.probabilidades = probs
-                self.problem = CarRenterProblem(n, dist_matrix, edge_arr, return_arr)
-                self.problem.nombre_instancia = nombre
-                self.problem.ruta_instancia = archivo
-                self.problem.probabilidades = probs
-                self.problem.coordenadas = coords
-                self.lbl_file.config(text=os.path.basename(archivo))
-                messagebox.showinfo("Éxito", f"Instancia cargada: {n} ciudades, {nv} vehículos\nProbabilidades leídas: {len(probs)} valores")
-                if self.var_mostrar_grafico.get():
-                    graficar_ciudades(coords, f"Distribución - {os.path.basename(archivo)}")
-                self.btn_run.config(state=tk.NORMAL)
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo cargar el archivo:\n{str(e)}")
+                vehiculos_ingresados = list(map(int, texto_veh.split()))
+            except ValueError:
+                messagebox.showerror("Error", "Los vehículos deben ser números enteros separados por espacios.")
+                return
+            L = len(ruta) - 1
+            if len(vehiculos_ingresados) != L:
+                messagebox.showerror("Error", f"Debe ingresar exactamente {L} vehículos (uno por arco).")
+                return
+            for v in vehiculos_ingresados:
+                if v < 0 or v >= self.problem.num_vehiculos:
+                    messagebox.showerror("Error", f"Vehículo {v} fuera de rango (0..{self.problem.num_vehiculos-1}).")
+                    return
+
+        start_time = time.time()
+        try:
+            # ---- Asignacion optima (DP) + formula + fuerza bruta ----
+            costo_det_opt, asignacion_opt, tipos_opt, _ = self.problem.costo_ruta_con_vehiculos(ruta)
+
+            # Costo esperado: FORMULA cerrada + FUERZA BRUTA como validacion
+            # cruzada (no solo fuerza bruta, y la fuerza bruta se salta con
+            # aviso -- no revienta el calculo entero -- si hay demasiados
+            # clientes para enumerar 2^n escenarios).
+            formula_opt, _, _, _ = self.problem.calcular_esperanza_formula_con_vehiculos(ruta, asignacion_opt)
+            fb_opt = None
+            diff_opt = None
+            skip_opt = None
+            try:
+                fb_opt = self.problem.calcular_esperanza_fuerza_bruta_con_vehiculos(ruta, asignacion_opt)
+                diff_opt = abs(formula_opt - fb_opt)
+            except ValueError as e:
+                skip_opt = str(e)
+
+            if vehiculos_ingresados is not None:
+                # Costo determinista de TU asignacion -- ahora incluye el
+                # costo de retorno por cada tramo contiguo (antes solo
+                # sumaba arcos).
+                costo_det_ing = self.problem.costo_determinista_con_asignacion(ruta, vehiculos_ingresados)
+
+                formula_ing, _, _, _ = self.problem.calcular_esperanza_formula_con_vehiculos(ruta, vehiculos_ingresados)
+                fb_ing = None
+                diff_ing = None
+                skip_ing = None
+                try:
+                    fb_ing = self.problem.calcular_esperanza_fuerza_bruta_con_vehiculos(ruta, vehiculos_ingresados)
+                    diff_ing = abs(formula_ing - fb_ing)
+                except ValueError as e:
+                    skip_ing = str(e)
+
+                diff_vs_opt = formula_ing - formula_opt
+            else:
+                costo_det_ing = None
+                formula_ing = fb_ing = diff_ing = skip_ing = diff_vs_opt = None
+
+            elapsed = time.time() - start_time
+
+            self.lbl_ruta_evaluada.config(text=f"Ruta evaluada: {ruta}")
+
+            texto_opt = f"Costo esperado (óptimo): fórmula={formula_opt:.6f}"
+            if fb_opt is not None:
+                texto_opt += f"  |  fuerza bruta={fb_opt:.6f}  (diff={diff_opt:.2e})"
+            else:
+                texto_opt += f"  |  fuerza bruta salteada ({skip_opt})"
+            self.lbl_esperanza_opt.config(text=texto_opt)
+            self.lbl_asignacion_opt.config(text=f"Asignación óptima de vehículos: {asignacion_opt}")
+            self.lbl_costo_det_opt.config(text=f"Costo determinista (óptimo): {costo_det_opt:.6f}")
+
+            if vehiculos_ingresados is not None:
+                texto_ing = f"Costo esperado (ingresado): fórmula={formula_ing:.6f}"
+                if fb_ing is not None:
+                    texto_ing += f"  |  fuerza bruta={fb_ing:.6f}  (diff={diff_ing:.2e})"
+                else:
+                    texto_ing += f"  |  fuerza bruta salteada ({skip_ing})"
+                self.lbl_esperanza_ing.config(text=texto_ing)
+                self.lbl_costo_det_ing.config(text=f"Costo determinista (ingresado): {costo_det_ing:.6f}")
+                self.lbl_diff.config(text=f"Diferencia esperado (ingresado - óptimo): {diff_vs_opt:.6f}")
+            else:
+                self.lbl_esperanza_ing.config(text="Costo esperado (ingresado): -- (no se ingresaron vehículos)")
+                self.lbl_costo_det_ing.config(text="Costo determinista (ingresado): --")
+                self.lbl_diff.config(text="Diferencia: --")
+
+            self.lbl_tiempo_eval.config(text=f"Tiempo de cálculo: {elapsed:.4f} s")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al calcular:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def actualizar_mejor_solucion(self, iteracion, costo_deterministico, ruta, vehiculos, tiempo_mejor):
         def update():
@@ -1543,7 +1784,7 @@ class CarsUnificadoGUI:
 
 
 # ------------------------------------------------------------
-# 7. EJECUCIÓN PRINCIPAL
+# 7. EJECUCIÓN PRINCIPAL-
 # ------------------------------------------------------------
 if __name__ == "__main__":
     app = CarsUnificadoGUI()
