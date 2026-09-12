@@ -49,11 +49,13 @@ class CarRenterProblem:
         ciudad_devolucion. Formula VECTOR (thesis p.53), igual que
         costo_arco_sin_retorno, generalizada a cualquier j (no solo el
         deposito) -- ver aco_cars_ptsp_exact_euclidean.py para el mismo fix."""
-        if ciudad_alquiler == ciudad_devolucion:
-            return 0.0
-        ri = self.return_rate[v][ciudad_alquiler]
-        rj = self.return_rate[v][ciudad_devolucion]
-        return (2 * ri + 3 * rj) / 3.0 + self.dist[ciudad_alquiler][ciudad_devolucion]
+        # if ciudad_alquiler == ciudad_devolucion:
+        #     return 0.0
+        # ri = self.return_rate[v][ciudad_alquiler]
+        # rj = self.return_rate[v][ciudad_devolucion]
+        # return (2 * ri + 3 * rj) / 3.0 + self.dist[ciudad_alquiler][ciudad_devolucion]
+           # """Deshabilitado: el costo de retorno no se considera (siempre 0)."""
+        return 0.0
 
     def costo_ruta_con_vehiculos(self, ruta):
         arcos = [(ruta[i], ruta[i+1]) for i in range(len(ruta)-1)]
@@ -99,12 +101,23 @@ class CarRenterProblem:
         # Variante "exato" (Silva 2011 thesis, p.48, section 3.3 item 3),
         # la misma que aco_cars_ptsp_exact_noneuclidean.py / aco_cars_ptsp_exact_euclidean.py /
         # alns_cars_noneuclidean.py: los num_vehiculos vehiculos deben usarse TODOS.
-        full_mask = max_mask - 1
-        if L < self.num_vehiculos or dp[L][full_mask] == float('inf'):
+        # full_mask = max_mask - 1
+        # if L < self.num_vehiculos or dp[L][full_mask] == float('inf'):
+        #     return float('inf'), [], set(), []
+
+        # mejor_costo = dp[L][full_mask]
+        # mejor_mask = full_mask
+
+        mejor_costo = float('inf')
+        mejor_mask = None
+        for m in range(max_mask):
+            if dp[L][m] < mejor_costo:
+                mejor_costo = dp[L][m]
+                mejor_mask = m
+
+        if mejor_mask is None or mejor_costo == float('inf'):
             return float('inf'), [], set(), []
 
-        mejor_costo = dp[L][full_mask]
-        mejor_mask = full_mask
 
         vehiculos_por_arco = [None] * L
         puntos_cambio = []
@@ -704,12 +717,21 @@ class ALNSSolver:
         calcula UNA SOLA VEZ, al final, sobre la mejor ruta encontrada
         (ver _calcular_expected_y_validar) -- no en cada evaluacion de la
         busqueda."""
+        # if len(ruta) < 2:
+        #     return 0.0
+        # costo, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(ruta)
+        # if not vehiculos:
+        #     return float('inf')
+        # return costo
+        """Costo ESPERADO (PTSP) via formula cerrada -- objetivo del ALNS."""
         if len(ruta) < 2:
             return 0.0
-        costo, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(ruta)
+        costo_det, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(ruta)
         if not vehiculos:
             return float('inf')
-        return costo
+        costo_esp, _, _, _ = self.problema.calcular_esperanza_formula_con_vehiculos(ruta, vehiculos)
+        return costo_esp
+
 
     def destruir_random(self, ruta):
         clientes = ruta[1:-1]
