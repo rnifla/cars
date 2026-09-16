@@ -76,11 +76,37 @@ vector-plus-distance formula already used for edge_costs (thesis p.53,
 VECTOR format: cost(i,j) = (2*v_i+3*v_j)/3 + dist(i,j)) to arbitrary j
 instead of hardcoding j=0: `return_costs[k][i][j] = (2*ri+3*rj)/3 +
 dist[i][j]`, ri=penalty[k][0][i], rj=penalty[k][0][j]. The DP
-(`assign_vehicles_dp_all_used`) now tracks, per (arc, vehicle, mask), the
+(`assign_vehicles_dp_all_used`) tracked, per (arc, vehicle, mask), the
 city where the CURRENT vehicle's block started (its rental origin): a
-switch pays return_costs[kp][origin_kp][src] (kp's real origin, not
-column 0); the final answer adds the still-open last vehicle's own
+switch paid return_costs[kp][origin_kp][src] (kp's real origin, not
+column 0); the final answer added the still-open last vehicle's own
 return_costs[k][origin_k][route[-1]] before declaring a winner.
+
+Return cost set to 0 (2026-09, explicit request, on top of the fix above)
+--------------------------------------------------------------------------
+`assign_vehicles_dp_all_used` no longer charges return_costs at all --
+switching vehicles is now free. Requested to explore the expected-cost
+(PTSP) objective as the ACS's search criterion without conflating it
+with a real cost term that expected_cost_ptsp() never modeled in the
+first place (it only reads edge_costs, never return_costs). Since
+switching is free, the DP no longer needs to track a block's origin --
+state dropped back to dp[t][k][mask] (three dimensions, matching the
+DP's shape from before the return-cost fix above). assign_vehicles_
+bruteforce was updated the same way: plain sum of arc costs, no return
+term.
+
+Objective switched to expected cost (2026-09, same request as above)
+--------------------------------------------------------------------------
+`evaluate()` now returns (vehicles, cost, expected_cost): `cost` is still
+the deterministic DP cost (kept only as a reference value, printed for
+comparison), but the ACS search itself -- ant route selection each
+iteration, 2-opt/Or-opt acceptance, the final local_search call, and the
+MMAS global pheromone update (deposit/tau_max/tau_min) -- now all compare
+and optimize `expected_cost` (expected_cost_ptsp()) instead of `cost`.
+This mirrors the same change already made in aco_cars_ptsp_exact_noneuclidean.py.
+Since return cost is 0 in the DP (see above) and expected_cost_ptsp()
+never modeled return cost anyway, there is no remaining mismatch between
+what the DP measures and what the PTSP formula measures.
 
 Usage:
     python aco_cars_ptsp_exact_euclidean.py
@@ -264,18 +290,24 @@ def assign_vehicles_dp_all_used(
     away from, it can never be picked up again later in the route. Each
     vehicle occupies exactly one contiguous block of arcs.
 
-    Return cost follows the thesis exactly (p.44 item 3): d^k_ij = cost
-    of returning vehicle k, RENTED at city i, DELIVERED at city j --
-    return_costs[k][i][j]. Every vehicle used pays this once, from its
-    own rental origin to wherever it is dropped off, INCLUDING the last
-    vehicle of the tour (p.47 worked example: the final car still pays to
-    return to its origin, even though it drives its last arc straight
-    into the depot).
+    RETURN COST TREATED AS 0 (2026-09, explicit request): this DP no
+    longer charges return_costs[k][origin][dropoff] when a block closes
+    -- switching vehicles is free. Requested to explore the
+    expected-cost (PTSP) objective without conflating it with a cost
+    term that formula itself never models (expected_cost_ptsp only
+    reads edge_costs, never return_costs). `return_costs` is still
+    accepted as a parameter (and EuclideanInstance.return_costs is still
+    built from the .car file) purely so this can be reverted later; it
+    is not used anywhere in this function.
 
-    dp[t][k][mask][origin] = min cost of arcs 0..t (the still-open
-    block's own return cost is NOT included yet), ending arc t with
-    vehicle k, whose current block started at city `origin`, mask = set
-    of vehicles used in arcs 0..t (bit k set).
+    Since switching costs nothing, the origin of a vehicle's block no
+    longer affects any future cost -- so, unlike the return-cost-aware
+    version of this function (see project history), the DP does not
+    need to track WHERE each block started. State drops back to three
+    dimensions instead of four:
+
+    dp[t][k][mask] = min cost of arcs 0..t, ending arc t with vehicle k,
+                     mask = set of vehicles used in arcs 0..t (bit k set).
 
     A transition into vehicle k where bit k is ALREADY set in the target
     mask is only valid if the previous arc also used k (continuing the
@@ -289,20 +321,17 @@ def assign_vehicles_dp_all_used(
     K = n_vehicles
     n_masks = 1 << K
     full_mask = n_masks - 1
-    N = edge_costs.shape[1]
 
     if n_arcs < K:
         return None, float('inf')
 
     INF = float('inf')
-    dp = np.full((n_arcs, K, n_masks, N), INF)
-    par_k = np.full((n_arcs, K, n_masks, N), -1, dtype=int)
-    par_mask = np.full((n_arcs, K, n_masks, N), -1, dtype=int)
-    par_origin = np.full((n_arcs, K, n_masks, N), -1, dtype=int)
+    dp = np.full((n_arcs, K, n_masks), INF)
+    par_k = np.full((n_arcs, K, n_masks), -1, dtype=int)
+    par_mask = np.full((n_arcs, K, n_masks), -1, dtype=int)
 
-    start_city = route[0]
     for k in range(K):
-        dp[0, k, 1 << k, start_city] = edge_costs[k, route[0], route[1]]
+        dp[0, k, 1 << k] = edge_costs[k, route[0], route[1]]
 
     for t in range(1, n_arcs):
         src, dst = route[t], route[t + 1]
@@ -313,67 +342,51 @@ def assign_vehicles_dp_all_used(
                 if not (mask & bit):
                     continue
 
-                # Case 1: k was already used before (bit set in mask before
-                # this arc too) -- the ONLY valid continuation is staying on
-                # k (kp == k). Switching back to k from any other kp would
-                # mean re-renting a vehicle already returned -- forbidden.
-                # Its block's origin carries over unchanged.
-                candidate = dp[t - 1, k, mask, :] + ec
-                better = candidate < dp[t, k, mask, :]
-                if np.any(better):
-                    dp[t, k, mask, better] = candidate[better]
-                    par_k[t, k, mask, better] = k
-                    par_mask[t, k, mask, better] = mask
-                    par_origin[t, k, mask, better] = np.nonzero(better)[0]
+                # Case 1: k was already used before -- only valid
+                # continuation is staying on k (no re-entry after a
+                # switch away).
+                prev_cost = dp[t - 1, k, mask]
+                if prev_cost != INF:
+                    total = prev_cost + ec
+                    if total < dp[t, k, mask]:
+                        dp[t, k, mask] = total
+                        par_k[t, k, mask] = k
+                        par_mask[t, k, mask] = mask
 
-                # Case 2: k is used here for the first time (bit not set
-                # before) -- opens a brand new block at city `src`.
-                # Whichever vehicle kp was active closes its block right
-                # now and pays its OWN return cost, from its real origin
-                # back to `src`.
+                # Case 2: k is used here for the first time -- opens a
+                # brand new block. Switching is free (return cost = 0),
+                # so we just take whichever previously-active vehicle
+                # kp had the cheapest cost so far.
                 prev_mask = mask ^ bit
                 for kp in range(K):
                     if kp == k:
-                        continue  # dp[t-1,k,prev_mask] is undefined: bit k not in prev_mask
-                    total_row = (
-                        dp[t - 1, kp, prev_mask, :]
-                        + return_costs[kp, :, src]
-                        + ec
-                    )
-                    best_origin_kp = int(np.argmin(total_row))
-                    best_total = total_row[best_origin_kp]
-                    if best_total < dp[t, k, mask, src]:
-                        dp[t, k, mask, src] = best_total
-                        par_k[t, k, mask, src] = kp
-                        par_mask[t, k, mask, src] = prev_mask
-                        par_origin[t, k, mask, src] = best_origin_kp
+                        continue
+                    prev_cost = dp[t - 1, kp, prev_mask]
+                    if prev_cost == INF:
+                        continue
+                    total = prev_cost + ec
+                    if total < dp[t, k, mask]:
+                        dp[t, k, mask] = total
+                        par_k[t, k, mask] = kp
+                        par_mask[t, k, mask] = prev_mask
 
-    # Close the last (still-open) vehicle's block: it must also return
-    # from its own rental origin to the city where the tour ends.
-    end_city = route[-1]
     best_cost = INF
     best_k = -1
-    best_origin = -1
     for k in range(K):
-        row = dp[n_arcs - 1, k, full_mask, :]
-        totals = row + return_costs[k, :, end_city]
-        idx = int(np.argmin(totals))
-        if totals[idx] < best_cost:
-            best_cost = totals[idx]
+        if dp[n_arcs - 1, k, full_mask] < best_cost:
+            best_cost = dp[n_arcs - 1, k, full_mask]
             best_k = k
-            best_origin = idx
 
     if best_k == -1 or best_cost == INF:
         return None, float('inf')
 
     vehicles = [0] * n_arcs
-    k, mask, origin = best_k, full_mask, best_origin
+    k, mask = best_k, full_mask
     vehicles[n_arcs - 1] = k
     for t in range(n_arcs - 1, 0, -1):
-        kp = int(par_k[t, k, mask, origin])
-        pm = int(par_mask[t, k, mask, origin])
-        po = int(par_origin[t, k, mask, origin])
-        k, mask, origin = kp, pm, po
+        kp = int(par_k[t, k, mask])
+        pm = int(par_mask[t, k, mask])
+        k, mask = kp, pm
         vehicles[t - 1] = k
 
     return vehicles, float(best_cost)
@@ -390,8 +403,8 @@ def assign_vehicles_bruteforce(
     vehicle in exactly one contiguous block, never reused after a
     switch). Only for small n_arcs (validation).
 
-    Cost per combo: arc costs + return_costs[k][origin][dropoff] for
-    EVERY contiguous block (thesis d^k_ij), including the last one."""
+    Return cost treated as 0 (see assign_vehicles_dp_all_used) -- cost
+    per combo is just the sum of arc costs."""
     n_arcs = len(route) - 1
     K = n_vehicles
 
@@ -416,16 +429,9 @@ def assign_vehicles_bruteforce(
             continue  # reuses a vehicle already returned -- invalid under "sem repeticao"
 
         total = 0.0
-        block_start_idx = 0
         for t in range(n_arcs):
             i, j, k = route[t], route[t + 1], combo[t]
             total += edge_costs[k, i, j]
-
-            is_last_arc = t == n_arcs - 1
-            switches_next = (not is_last_arc) and combo[t + 1] != k
-            if switches_next or is_last_arc:
-                total += return_costs[k, route[block_start_idx], route[t + 1]]
-                block_start_idx = t + 1
 
         if total < best_cost:
             best_cost = total
@@ -580,17 +586,24 @@ def _run_ptsp_verification(route, vehicles, inst: EuclideanInstance, max_n_for_b
     print(f"{'=' * 70}")
 
 
-def evaluate(route: List[int], inst: EuclideanInstance) -> Tuple[Optional[List[int]], float]:
-    return assign_vehicles_dp_all_used(route, inst.edge_costs, inst.return_costs, inst.K)
+def evaluate(route: List[int], inst: EuclideanInstance) -> Tuple[Optional[List[int]], float, float]:
+    """Returns (vehicles, cost, expected_cost). `cost` is the deterministic
+    DP cost (kept as a reference value only); `expected_cost` (PTSP,
+    objective switched 2026-09) is what the ACS search actually optimizes."""
+    vehicles, cost = assign_vehicles_dp_all_used(route, inst.edge_costs, inst.return_costs, inst.K)
+    if vehicles is None:
+        return None, float('inf'), float('inf')
+    expected, _, _, _ = expected_cost_ptsp(route, vehicles, inst)
+    return vehicles, cost, expected
 
 
 # =====================================================
 # BUSQUEDA LOCAL -- 2-opt
 # =====================================================
 
-def two_opt(route: List[int], inst: EuclideanInstance) -> Tuple[List[int], Optional[List[int]], float]:
+def two_opt(route: List[int], inst: EuclideanInstance) -> Tuple[List[int], Optional[List[int]], float, float]:
     best_route = route[:]
-    best_vehicles, best_cost = evaluate(best_route, inst)
+    best_vehicles, best_cost, best_expected = evaluate(best_route, inst)
     improved = True
 
     while improved:
@@ -598,24 +611,24 @@ def two_opt(route: List[int], inst: EuclideanInstance) -> Tuple[List[int], Optio
         for i in range(1, len(best_route) - 2):
             for j in range(i + 1, len(best_route) - 1):
                 new_route = best_route[:i] + best_route[i:j][::-1] + best_route[j:]
-                new_vehicles, new_cost = evaluate(new_route, inst)
-                if new_cost < best_cost - 1e-9:
-                    best_route, best_vehicles, best_cost = new_route, new_vehicles, new_cost
+                new_vehicles, new_cost, new_expected = evaluate(new_route, inst)
+                if new_expected < best_expected - 1e-9:
+                    best_route, best_vehicles, best_cost, best_expected = new_route, new_vehicles, new_cost, new_expected
                     improved = True
                     break
             if improved:
                 break
 
-    return best_route, best_vehicles, best_cost
+    return best_route, best_vehicles, best_cost, best_expected
 
 
 # =====================================================
 # BUSQUEDA LOCAL -- Or-opt
 # =====================================================
 
-def or_opt(route: List[int], inst: EuclideanInstance, segment_sizes=(1, 2, 3)) -> Tuple[List[int], Optional[List[int]], float]:
+def or_opt(route: List[int], inst: EuclideanInstance, segment_sizes=(1, 2, 3)) -> Tuple[List[int], Optional[List[int]], float, float]:
     best_route = route[:]
-    best_vehicles, best_cost = evaluate(best_route, inst)
+    best_vehicles, best_cost, best_expected = evaluate(best_route, inst)
     improved = True
 
     while improved:
@@ -631,9 +644,9 @@ def or_opt(route: List[int], inst: EuclideanInstance, segment_sizes=(1, 2, 3)) -
                     new_route = remaining[:j] + segment + remaining[j:]
                     if new_route[0] != 0 or new_route[-1] != 0:
                         continue
-                    new_vehicles, new_cost = evaluate(new_route, inst)
-                    if new_cost < best_cost - 1e-9:
-                        best_route, best_vehicles, best_cost = new_route, new_vehicles, new_cost
+                    new_vehicles, new_cost, new_expected = evaluate(new_route, inst)
+                    if new_expected < best_expected - 1e-9:
+                        best_route, best_vehicles, best_cost, best_expected = new_route, new_vehicles, new_cost, new_expected
                         improved = True
                         break
                 if improved:
@@ -641,26 +654,26 @@ def or_opt(route: List[int], inst: EuclideanInstance, segment_sizes=(1, 2, 3)) -
             if improved:
                 break
 
-    return best_route, best_vehicles, best_cost
+    return best_route, best_vehicles, best_cost, best_expected
 
 
-def local_search(route: List[int], inst: EuclideanInstance) -> Tuple[List[int], Optional[List[int]], float]:
+def local_search(route: List[int], inst: EuclideanInstance) -> Tuple[List[int], Optional[List[int]], float, float]:
     current = route[:]
     improved = True
     while improved:
         improved = False
-        new_route, new_vehicles, new_cost = two_opt(current, inst)
-        _, current_cost = evaluate(current, inst)
-        if new_cost < current_cost - 1e-9:
+        new_route, new_vehicles, new_cost, new_expected = two_opt(current, inst)
+        _, _, current_expected = evaluate(current, inst)
+        if new_expected < current_expected - 1e-9:
             current = new_route
             improved = True
-        new_route, new_vehicles, new_cost = or_opt(current, inst)
-        _, current_cost = evaluate(current, inst)
-        if new_cost < current_cost - 1e-9:
+        new_route, new_vehicles, new_cost, new_expected = or_opt(current, inst)
+        _, _, current_expected = evaluate(current, inst)
+        if new_expected < current_expected - 1e-9:
             current = new_route
             improved = True
-    vehicles, cost = evaluate(current, inst)
-    return current, vehicles, cost
+    vehicles, cost, expected = evaluate(current, inst)
+    return current, vehicles, cost, expected
 
 
 # =====================================================
@@ -701,6 +714,7 @@ class ACS:
         self.best_route: Optional[List[int]] = None
         self.best_vehicles: Optional[List[int]] = None
         self.best_cost = float('inf')
+        self.best_expected = float('inf')
         self.history: List[float] = []
         self._last_improvement_iter = 0
         self._last_reset_iter = 0
@@ -730,8 +744,8 @@ class ACS:
             remaining.remove(nxt)
             current = nxt
         route.append(0)
-        _, cost = evaluate(route, self.inst)
-        return cost if cost != float('inf') else 1.0
+        _, _, expected = evaluate(route, self.inst)
+        return expected if (expected != float('inf') and expected > 0) else 1.0
 
     def _select_next(self, current, unvisited_arr):
         if random.random() < self.cfg.q0:
@@ -768,11 +782,11 @@ class ACS:
         if self.best_route is None:
             return
         self.pheromone *= (1 - self.cfg.rho)
-        deposit = self.cfg.rho / self.best_cost
+        deposit = self.cfg.rho / self.best_expected
         for t in range(len(self.best_route) - 1):
             self.pheromone[self.best_route[t], self.best_route[t + 1]] += deposit
 
-        tau_max = 1.0 / (self.cfg.rho * self.best_cost)
+        tau_max = 1.0 / (self.cfg.rho * self.best_expected)
         tau_min = tau_max / (2 * self.N)
         np.clip(self.pheromone, tau_min, tau_max, out=self.pheromone)
 
@@ -783,7 +797,7 @@ class ACS:
     def run(self, verbose=True):
         if verbose:
             print("\n" + "=" * 70)
-            print("  ACS -- CaRS Euclidiano (con DP 'exato' + MMAS)")
+            print("  ACS -- CaRS Euclidiano (con DP 'exato' + MMAS, objetivo: costo esperado PTSP)")
             print("=" * 70)
             print(f"  Nodos: {self.N}, Vehiculos: {self.K}")
             print(f"  Hormigas: {self.cfg.n_ants}, Iteraciones: {self.cfg.n_iterations}")
@@ -792,19 +806,20 @@ class ACS:
 
         start = time.time()
         for it in range(self.cfg.n_iterations):
-            it_best_route, it_best_vehicles, it_best_cost = None, None, float('inf')
+            it_best_route, it_best_vehicles, it_best_cost, it_best_expected = None, None, float('inf'), float('inf')
             for _ in range(self.cfg.n_ants):
                 route = self._construct_route()
-                vehicles, cost = evaluate(route, self.inst)
-                if vehicles is not None and cost < it_best_cost:
-                    it_best_route, it_best_vehicles, it_best_cost = route, vehicles, cost
+                vehicles, cost, expected = evaluate(route, self.inst)
+                if vehicles is not None and expected < it_best_expected:
+                    it_best_route, it_best_vehicles, it_best_cost, it_best_expected = route, vehicles, cost, expected
 
-            if it_best_route is not None and it_best_cost < self.best_cost:
-                self.best_route, self.best_vehicles, self.best_cost = it_best_route[:], it_best_vehicles[:], it_best_cost
+            if it_best_route is not None and it_best_expected < self.best_expected:
+                self.best_route, self.best_vehicles = it_best_route[:], it_best_vehicles[:]
+                self.best_cost, self.best_expected = it_best_cost, it_best_expected
                 self._last_improvement_iter = it
 
             self._global_pheromone_update()
-            self.history.append(self.best_cost)
+            self.history.append(self.best_expected)
 
             if self._is_stagnant(it):
                 if verbose:
@@ -813,15 +828,15 @@ class ACS:
                 self._last_reset_iter = it
 
             if verbose and (it % 20 == 0 or it == self.cfg.n_iterations - 1):
-                print(f"  Iter {it + 1:4d}/{self.cfg.n_iterations}: Best = {self.best_cost:.2f}")
+                print(f"  Iter {it + 1:4d}/{self.cfg.n_iterations}: Best (esperado) = {self.best_expected:.2f}  (deterministico = {self.best_cost:.2f})")
 
         if self.best_route is not None:
-            self.best_route, self.best_vehicles, self.best_cost = local_search(self.best_route, self.inst)
+            self.best_route, self.best_vehicles, self.best_cost, self.best_expected = local_search(self.best_route, self.inst)
 
         if verbose:
             print(f"\n  Tiempo: {time.time() - start:.2f}s")
 
-        return self.best_route, self.best_vehicles, self.best_cost
+        return self.best_route, self.best_vehicles, self.best_cost, self.best_expected
 
 
 # =====================================================
@@ -841,39 +856,44 @@ if __name__ == "__main__":
     print("  EJECUTANDO MULTIPLES VECES")
     print("=" * 70)
 
-    best_overall = float('inf')
+    best_overall = float('inf')          # deterministic cost, reference only
+    best_expected_overall = float('inf')  # PTSP expected cost -- selection criterion
     best_route_overall = None
     best_vehicles_overall = None
     all_results = []
+    all_expected = []
 
     num_runs = 2
     for run in range(num_runs):
         print(f"\n--- Ejecucion {run + 1}/{num_runs} ---")
         acs = ACS(inst, ACOConfig(**{**cfg.__dict__, "seed": run * 1000 + 42}))
-        route, vehicles, cost = acs.run()
+        route, vehicles, cost, expected = acs.run()
 
         if route is None or vehicles is None:
             print("  No se encontro solucion valida (exato) para esta corrida")
             continue
 
-        print(f"  ACS + local search: {cost:.2f}")
+        print(f"  ACS + local search: esperado={expected:.2f}  (deterministico={cost:.2f})")
 
-        if cost < best_overall:
+        if expected < best_expected_overall:
             best_overall = cost
+            best_expected_overall = expected
             best_route_overall = route[:]
             best_vehicles_overall = vehicles[:]
-            print(f"  NUEVO MEJOR: {best_overall:.2f}")
+            print(f"  NUEVO MEJOR (esperado): {best_expected_overall:.2f}")
 
         all_results.append(cost)
+        all_expected.append(expected)
 
     if best_route_overall is None:
         print("\nNo se encontro ninguna solucion valida")
         raise SystemExit(1)
 
     print("\n" + "=" * 70)
-    print("  RESULTADO FINAL")
+    print("  RESULTADO FINAL (seleccionado por costo esperado PTSP)")
     print("=" * 70)
-    print(f"  Costo total: {best_overall:.2f}")
+    print(f"  Costo esperado (PTSP):  {best_expected_overall:.2f}")
+    print(f"  Costo deterministico:   {best_overall:.2f}  (referencia, no es el objetivo)")
     print(f"  Longitud ruta: {len(best_route_overall)} nodos")
     print(f"  Vehiculos utilizados: {sorted(set(best_vehicles_overall))}  (debe ser {list(range(K))}, variante 'exato')")
 
@@ -881,12 +901,12 @@ if __name__ == "__main__":
     for t in range(len(best_route_overall) - 1):
         print(f"    {best_route_overall[t]:3d} -> {best_route_overall[t + 1]:3d} | Vehiculo {best_vehicles_overall[t] + 1}")
 
-    if all_results:
-        print("\n  Estadisticas:")
-        print(f"    Mejor:      {min(all_results):.2f}")
-        print(f"    Peor:       {max(all_results):.2f}")
-        print(f"    Promedio:   {np.mean(all_results):.2f}")
-        print(f"    Desviacion: {np.std(all_results):.2f}")
+    if all_expected:
+        print("\n  Estadisticas (costo esperado):")
+        print(f"    Mejor:      {min(all_expected):.2f}")
+        print(f"    Peor:       {max(all_expected):.2f}")
+        print(f"    Promedio:   {np.mean(all_expected):.2f}")
+        print(f"    Desviacion: {np.std(all_expected):.2f}")
     print("=" * 70)
 
     # -------------------------------------------------

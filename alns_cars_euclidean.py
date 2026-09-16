@@ -25,6 +25,31 @@ if not os.path.exists(RUTA_SOLUCIONES):
         print(f"No se pudo crear la carpeta: {RUTA_SOLUCIONES} - {e}")
 
 # ------------------------------------------------------------
+# Cambios 2026-09 (mismo cambio ya aplicado en
+# aco_cars_ptsp_exact_noneuclidean.py / aco_cars_ptsp_exact_euclidean.py /
+# alns_cars_noneuclidean.py):
+#
+# 1. Costo de retorno tratado como 0: CarRenterProblem.costo_retorno()
+#    ahora siempre devuelve 0.0 -- cambiar de vehiculo pasa a ser
+#    gratis. La formula real d^k_ij de la tesis (Silva 2011, p.44 item
+#    3) queda conservada, sin usar, en _costo_retorno_real(), por si se
+#    revierte este cambio mas adelante. Como TODAS las funciones de
+#    costo determinista del archivo (costo_ruta_con_vehiculos, grafico)
+#    pasan por costo_retorno(), este unico cambio las deja a todas
+#    consistentes automaticamente.
+#
+# 2. Objetivo del ALNS cambiado a costo esperado PTSP:
+#    ALNSSolver._evaluar_ruta() -- el criterio de aceptacion/rechazo
+#    que usa toda la busqueda (2-opt local, destroy/repair, temple
+#    simulado) -- ahora calcula la asignacion optima de vehiculos por
+#    DP (para minimizar el costo de los arcos) y despues mide el costo
+#    ESPERADO (calcular_esperanza_formula_con_vehiculos) sobre esa
+#    asignacion; es ese valor el que se compara. El costo determinista
+#    se sigue calculando y mostrando por separado (GUI, exportacion)
+#    como referencia, nunca como criterio de busqueda.
+# ------------------------------------------------------------
+
+# ------------------------------------------------------------
 # 1. DEFINICIÓN DEL PROBLEMA CaRS (CON PROBABILIDADES)
 # ------------------------------------------------------------
 class CarRenterProblem:
@@ -44,11 +69,23 @@ class CarRenterProblem:
         return term + self.dist[i][j]
 
     def costo_retorno(self, ciudad_alquiler, ciudad_devolucion, v):
-        """d^k_ij de la tesis (Silva 2011, p.44 item 3): costo de devolver
-        el vehiculo v, ALQUILADO en ciudad_alquiler, ENTREGADO en
-        ciudad_devolucion. Formula VECTOR (thesis p.53), igual que
+        """Costo de devolver el vehiculo v, ALQUILADO en ciudad_alquiler,
+        ENTREGADO en ciudad_devolucion.
+
+        RETURN COST TRATADO COMO 0 (2026-09, mismo cambio que
+        aco_cars_ptsp_exact_noneuclidean.py / aco_cars_ptsp_exact_euclidean.py /
+        alns_cars_noneuclidean.py): cambiar de vehiculo pasa a ser gratis.
+        La formula real d^k_ij de la tesis (Silva 2011, p.44 item 3) queda
+        en _costo_retorno_real(), sin usar en ningun lado del archivo,
+        solo por si se revierte este cambio mas adelante."""
+        return 0.0
+
+    def _costo_retorno_real(self, ciudad_alquiler, ciudad_devolucion, v):
+        """Formula real d^k_ij de la tesis (Silva 2011, p.44 item 3): costo
+        de devolver el vehiculo v, ALQUILADO en ciudad_alquiler, ENTREGADO
+        en ciudad_devolucion. Formula VECTOR (thesis p.53), igual que
         costo_arco_sin_retorno, generalizada a cualquier j (no solo el
-        deposito) -- ver aco_cars_ptsp_exact_euclidean.py para el mismo fix."""
+        deposito). NO UTILIZADA actualmente -- ver costo_retorno()."""
         if ciudad_alquiler == ciudad_devolucion:
             return 0.0
         ri = self.return_rate[v][ciudad_alquiler]
@@ -517,9 +554,7 @@ def graficar_ruta_con_vehiculos(coordenadas, ruta, vehiculos_por_arco, tipos_usa
 
             costo_ret = problema.costo_retorno(alq, dev, v)
             if alq != dev:
-                termino_rr = (problema.return_rate[v][alq] * 2 + problema.return_rate[v][0] * 3) / 3.0
-                distancia = problema.dist[alq][dev]
-                texto_ret = f"RET v{v}: {costo_ret:.2f}\n(d={distancia:.2f} + rr={termino_rr:.2f})"
+                texto_ret = f"Cambio de vehiculo {v}\ncosto de retorno = {costo_ret:.2f}"
                 tx = ux * 1.0 + px * off * 0.3
                 ty = uy * 1.0 + py * off * 0.3
                 label_x = xd + tx
@@ -698,18 +733,24 @@ class ALNSSolver:
         self.max_estanc_tiempo = max_estanc_tiempo
 
     def _evaluar_ruta(self, ruta):
-        """Costo DETERMINISTICO (arcos + retorno correcto, thesis d^k_ij)
-        de la ruta, con la asignacion optima de vehiculos via DP -- este
-        es el objetivo que busca el ALNS. El costo esperado (PTSP) se
-        calcula UNA SOLA VEZ, al final, sobre la mejor ruta encontrada
-        (ver _calcular_expected_y_validar) -- no en cada evaluacion de la
-        busqueda."""
+        """Costo ESPERADO (PTSP) de la ruta -- objetivo switched a costo
+        esperado (2026-09, mismo cambio que
+        aco_cars_ptsp_exact_noneuclidean.py / aco_cars_ptsp_exact_euclidean.py /
+        alns_cars_noneuclidean.py): este es el valor que compara/acepta
+        toda la busqueda del ALNS (2-opt local, destroy/repair, temple
+        simulado). Se calcula la asignacion de vehiculos que minimiza el
+        costo de los arcos (DP), y sobre ESA asignacion se mide el costo
+        esperado -- se llama en cada evaluacion de la busqueda, a
+        diferencia de la validacion cruzada contra fuerza bruta, que
+        sigue calculandose UNA SOLA VEZ al final (ver
+        _calcular_expected_y_validar)."""
         if len(ruta) < 2:
             return 0.0
-        costo, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(ruta)
+        _, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(ruta)
         if not vehiculos:
             return float('inf')
-        return costo
+        esperado, _, _, _ = self.problema.calcular_esperanza_formula_con_vehiculos(ruta, vehiculos)
+        return esperado
 
     def destruir_random(self, ruta):
         clientes = ruta[1:-1]
@@ -983,8 +1024,8 @@ class ALNSSolver:
         tiempo_ultima_mejora = self.tiempo_mejor
 
         if callback_mejora:
-            _, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(self.mejor_ruta)
-            callback_mejora(0, self.mejor_costo, self.mejor_ruta, vehiculos, self.tiempo_mejor)
+            costo_det_actual, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(self.mejor_ruta)
+            callback_mejora(0, self.mejor_costo, costo_det_actual, self.mejor_ruta, vehiculos, self.tiempo_mejor)
 
         for it in range(1, self.max_iter+1):
             if self.pausa_event.is_set():
@@ -1036,8 +1077,8 @@ class ALNSSolver:
                 mejoro = True
                 iter_sin_mejora = 0
                 if callback_mejora:
-                    _, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(self.mejor_ruta)
-                    callback_mejora(it, self.mejor_costo, self.mejor_ruta, vehiculos, self.tiempo_mejor)
+                    costo_det_actual, vehiculos, _, _ = self.problema.costo_ruta_con_vehiculos(self.mejor_ruta)
+                    callback_mejora(it, self.mejor_costo, costo_det_actual, self.mejor_ruta, vehiculos, self.tiempo_mejor)
             elif costo_nuevo < costo_actual:
                 puntos = 9
             else:
@@ -1238,9 +1279,9 @@ class CarsUnificadoGUI:
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo cargar el archivo:\n{str(e)}")
 
-    def actualizar_mejor_solucion(self, iteracion, costo_deterministico, ruta, vehiculos, tiempo_mejor):
+    def actualizar_mejor_solucion(self, iteracion, costo_esperado, costo_deterministico, ruta, vehiculos, tiempo_mejor):
         def update():
-            self.lbl_mejor_costo.config(text=f"Costo determinístico (ALNS, en progreso): {costo_deterministico:.6f}")
+            self.lbl_mejor_costo.config(text=f"Costo esperado (ALNS, en progreso): {costo_esperado:.6f}  |  Costo determinístico (referencia): {costo_deterministico:.6f}")
             self.lbl_mejor_iter.config(text=f"Iteración mejor solución: {iteracion}")
             self.lbl_mejor_tiempo.config(text=f"Tiempo mejor solución: {tiempo_mejor:.2f} s")
             if ruta:
@@ -1249,7 +1290,7 @@ class CarsUnificadoGUI:
                     costo_v, v_arco, tipos, puntos = self.problem.costo_ruta_con_vehiculos(ruta)
                     self.lbl_vehiculos_arco.config(text=f"Vehículos por arco (visual): {v_arco}")
                     self.lbl_tipos_usados.config(text=f"Tipos usados (visual): {sorted(tipos)}")
-            self.txt_result.insert(tk.END, f"✨ Mejora en iter {iteracion}: costo determinístico = {costo_deterministico:.6f}  (tiempo: {tiempo_mejor:.2f}s)\n")
+            self.txt_result.insert(tk.END, f"✨ Mejora en iter {iteracion}: costo esperado = {costo_esperado:.6f}  (determinístico: {costo_deterministico:.6f}, tiempo: {tiempo_mejor:.2f}s)\n")
             self.txt_result.see(tk.END)
         self.root.after(0, update)
 
@@ -1259,7 +1300,12 @@ class CarsUnificadoGUI:
             self.root.after(0, lambda: self.lbl_tiempo_total.config(text=f"Tiempo total de ejecución: {tiempo_total:.2f} s"))
             self.root.after(0, lambda: self.lbl_estado.config(text=f"Estado: Ejecutando (iter {iteracion})"))
 
-    def exportar_desde_solver(self, ruta, vehiculos, costo_deterministico, iteracion, motivo):
+    def exportar_desde_solver(self, ruta, vehiculos, costo_esperado_busqueda, iteracion, motivo):
+        # costo_esperado_busqueda (self.mejor_costo del solver, ahora el
+        # costo esperado PTSP -- 2026-09) no se usa directamente aca: el
+        # archivo exportado recalcula costo_v (determinista, real) abajo
+        # y lee self.solver.mejor_costo_esperado (esperado, ya validado
+        # contra fuerza bruta cuando esta disponible).
         if self.problem and ruta:
             costo_v, v_arco, _, _ = self.problem.costo_ruta_con_vehiculos(ruta)
             costo_esp = self.solver.mejor_costo_esperado if self.solver else None
@@ -1299,7 +1345,7 @@ class CarsUnificadoGUI:
         self.btn_graficar_alns.config(state=tk.DISABLED)
         self.txt_result.delete(1.0, tk.END)
         self.lbl_estado.config(text="Ejecutando...")
-        self.lbl_mejor_costo.config(text="Costo determinístico (ALNS, en progreso): --")
+        self.lbl_mejor_costo.config(text="Costo esperado (ALNS, en progreso): --")
         self.lbl_mejor_iter.config(text="Iteración mejor solución: --")
         self.lbl_mejor_tiempo.config(text="Tiempo mejor solución: --")
         self.lbl_mejor_ruta.config(text="Mejor ruta: --")
@@ -1414,14 +1460,18 @@ class CarsUnificadoGUI:
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo graficar:\n{str(e)}")
 
-    def finalizar(self, mejor_ruta, mejor_costo_det, tiempo_total):
-        # El ALNS busco por costo DETERMINISTICO (mejor_costo_det). El
-        # costo esperado (formula) y su validacion por fuerza bruta ya se
-        # calcularon UNA SOLA VEZ dentro de ejecutar() -- se leen del
-        # solver, no se recalculan aca (evita repetir una fuerza bruta
-        # potencialmente cara, y evita comparar el mismo numero contra si
-        # mismo como pasaba antes).
-        _, vehiculos, tipos, puntos_cambio = self.problem.costo_ruta_con_vehiculos(mejor_ruta)
+    def finalizar(self, mejor_ruta, mejor_costo_esperado_busqueda, tiempo_total):
+        # El ALNS busco por costo ESPERADO (mejor_costo_esperado_busqueda,
+        # 2026-09 -- antes era el costo determinista). El costo esperado
+        # (formula) y su validacion por fuerza bruta ya se calcularon UNA
+        # SOLA VEZ dentro de ejecutar() -- se leen del solver, no se
+        # recalculan aca (evita repetir una fuerza bruta potencialmente
+        # cara, y evita comparar el mismo numero contra si mismo como
+        # pasaba antes). Ambos valores deberian coincidir (misma formula,
+        # misma ruta/vehiculos); el costo determinista real de la ruta
+        # final se recalcula abajo (costo_det) para mostrarlo como
+        # referencia.
+        costo_det, vehiculos, tipos, puntos_cambio = self.problem.costo_ruta_con_vehiculos(mejor_ruta)
         self.ruta_actual = mejor_ruta
         self.vehiculos_actuales = vehiculos
         self.tipos_actuales = tipos
@@ -1438,19 +1488,19 @@ class CarsUnificadoGUI:
         self.btn_stop.config(state=tk.DISABLED)
         self.btn_export.config(state=tk.NORMAL)
         self.btn_graficar_alns.config(state=tk.NORMAL)
-        self.lbl_estado.config(text=f"Finalizado - Determinístico: {mejor_costo_det:.6f}")
+        self.lbl_estado.config(text=f"Finalizado - Esperado: {costo_esperado:.6f}" if costo_esperado is not None else f"Finalizado - Determinístico: {costo_det:.6f}")
         self.lbl_tiempo_total.config(text=f"Tiempo total de ejecución: {tiempo_total:.2f} s")
 
-        texto_costo = f"Costo determinístico (ALNS): {mejor_costo_det:.6f}"
+        texto_costo = f"Costo determinístico (referencia): {costo_det:.6f}"
         if costo_esperado is not None:
-            texto_costo += f"  |  Costo esperado (PTSP): {costo_esperado:.6f}"
+            texto_costo += f"  |  Costo esperado (PTSP, objetivo del ALNS): {costo_esperado:.6f}"
         self.lbl_mejor_costo.config(text=texto_costo)
 
         self.txt_result.insert(tk.END, "\n" + "="*60 + "\n")
         self.txt_result.insert(tk.END, "RESULTADOS FINALES\n")
-        self.txt_result.insert(tk.END, f"Costo determinístico (ALNS, búsqueda): {mejor_costo_det:.6f}\n")
+        self.txt_result.insert(tk.END, f"Costo determinístico (referencia, ruta final): {costo_det:.6f}\n")
         if costo_esperado is not None:
-            self.txt_result.insert(tk.END, f"Costo esperado (fórmula PTSP, sobre la ruta final): {costo_esperado:.6f}\n")
+            self.txt_result.insert(tk.END, f"Costo esperado (fórmula PTSP, objetivo del ALNS): {costo_esperado:.6f}\n")
         if costo_fb is not None:
             self.txt_result.insert(tk.END, f"Costo esperado (fuerza bruta, validación): {costo_fb:.6f}\n")
             self.txt_result.insert(tk.END, f"Diferencia fórmula vs fuerza bruta: {diff:.10f}\n")
@@ -1507,7 +1557,7 @@ class CarsUnificadoGUI:
         )
         msg_verif = "✅ Coinciden" if (diff is not None and diff < 1e-9) else ("⚠️ Diferencia" if diff is not None else "N/A")
         messagebox.showinfo("Completado", f"Ejecución finalizada.\n"
-                                          f"Costo determinístico (ALNS): {mejor_costo_det:.6f}\n"
+                                          f"Costo determinístico (referencia): {costo_det:.6f}\n"
                                           f"{msg_esperado}"
                                           f"{msg_fb}"
                                           f"Verificación fórmula vs fuerza bruta: {msg_verif}\n"

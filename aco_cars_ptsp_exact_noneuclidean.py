@@ -56,19 +56,46 @@ arc straight into the depot F but still must return to C (where IT was
 rented): "para o caso do carro 3, o retorno ao vertice C quando o carro
 e entregue no vertice F custa duas unidades." Total: 6+1+2+2 = 11.
 
-Fix: the DP state now tracks, per (arc, vehicle, mask), the city where
-the CURRENT vehicle's block started (its rental origin). A switch pays
+Fix: the DP state tracked, per (arc, vehicle, mask), the city where
+the CURRENT vehicle's block started (its rental origin). A switch paid
 return_costs[kp][origin_kp][src] (kp's real origin, not column 0); the
-final answer adds the still-open last vehicle's own
+final answer added the still-open last vehicle's own
 return_costs[k][origin_k][route[-1]] before declaring a winner.
 
-State: dp[t][k][mask][origin] = min cost of arcs 0..t (return cost of the
-still-open block NOT yet included), ending arc t with vehicle k, block
-started at city `origin`, mask = set of vehicles used so far (bit k
-set). A transition into k where bit k is already set in mask is only
-valid if the previous arc ALSO used k (continuing the same block) --
-never from a different vehicle, which would mean re-renting one already
-returned.
+Return cost set to 0 (2026-09, explicit request, on top of the fix above)
+--------------------------------------------------------------------------
+`assign_vehicles_dp` no longer charges return_costs at all -- switching
+vehicles is now free. This was requested to explore the expected-cost
+(PTSP) objective as the ACS's search criterion without conflating it
+with a real cost term that expected_cost_ptsp() never modeled in the
+first place (it only reads edge_costs, never return_costs). Since
+switching is free, the DP no longer needs to track a block's origin --
+state dropped back to dp[t][k][mask] (three dimensions, matching the
+DP's shape from before the return-cost fix above -- see that section's
+history for the origin-tracking version if this needs to be reverted).
+verify_cost/cost_breakdown/assign_vehicles_bruteforce were updated the
+same way: plain sum of arc costs, no return term.
+
+Objective switched to expected cost (2026-09, on top of the two changes
+above)
+--------------------------------------------------------------------------
+The ACS now searches for the route that minimizes the PTSP EXPECTED
+cost (expected_cost_ptsp), not the deterministic cost. `Solution` gained
+an `expected_cost` field; `evaluate()` computes it right after the DP
+(using the SAME `vehicles` the DP decided -- the DP itself is
+unchanged, still deterministic, still never touches probabilities).
+Every comparison point that used to read `.cost` now reads
+`.expected_cost`: iteration-best/global-best selection, the global
+pheromone deposit and MMAS tau_min/tau_max bounds, tau0 calibration via
+nearest_neighbor_cost, and 2-opt/Or-opt acceptance. `.cost` (now always
+the same as a plain arc-cost sum, since return=0 above) is kept purely
+as a reported reference value -- nothing compares by it anymore.
+
+Note this closes the earlier caveat about expected_cost_ptsp() never
+modeling return cost: since assign_vehicles_dp above no longer charges
+return cost either, there is no more mismatch between what the DP
+optimizes and what expected_cost_ptsp() measures -- both are now
+consistently "arc costs only".
 
 Run directly:
     python aco_cars_ptsp_exact_noneuclidean.py
@@ -102,13 +129,22 @@ class CaRSInstance:
 
 @dataclass
 class Solution:
-    """A complete CaRS solution: route + per-arc vehicle assignment + cost."""
+    """A complete CaRS solution: route + per-arc vehicle assignment +
+    costs. `cost` is the deterministic cost (arcs only, return=0 -- see
+    assign_vehicles_dp). `expected_cost` is the PTSP expected cost of
+    that SAME (route, vehicles) pair -- the objective this file
+    actually searches for. The DP still decides `vehicles`/`cost` on
+    its own; `expected_cost` is measured afterwards, never optimized by
+    the DP itself."""
     route: List[int]
     vehicles: List[int]
     cost: float
+    expected_cost: float
 
     def copy(self) -> "Solution":
-        return Solution(self.route[:], self.vehicles[:], self.cost)
+        return Solution(
+            self.route[:], self.vehicles[:], self.cost, self.expected_cost
+        )
 
 
 @dataclass
@@ -230,18 +266,24 @@ def assign_vehicles_dp(
     it can never be reused -- each vehicle occupies exactly one
     contiguous block of arcs.
 
-    Return cost follows the thesis exactly (Silva 2011, p.44 item 3):
-    d^k_ij = cost of returning vehicle k, RENTED at city i, DELIVERED at
-    city j -- return_costs[k][i][j]. Every vehicle used pays this once,
-    from its own rental origin to wherever it is dropped off, INCLUDING
-    the last vehicle of the tour (p.47 worked example: the final car
-    still pays to return to its origin, even though it drives its last
-    arc straight into the depot).
+    RETURN COST TREATED AS 0 (2026-09, explicit request): this DP no
+    longer charges return_costs[k][origin][dropoff] when a block closes
+    -- switching vehicles is free. Requested to explore the
+    expected-cost (PTSP) objective without conflating it with a cost
+    term that formula itself never models (expected_cost_ptsp only
+    reads edge_costs, never return_costs). `return_costs` is still
+    accepted as a parameter (and instance.return_costs is still parsed
+    from the .car file) purely so this can be reverted later; it is not
+    used anywhere in this function.
 
-    dp[t][k][mask][origin] = min cost of arcs 0..t (the still-open
-    block's own return cost is NOT included yet), ending arc t with
-    vehicle k, whose current block started at city `origin`, mask = set
-    of vehicles used in arcs 0..t (bit k set).
+    Since switching costs nothing, the origin of a vehicle's block no
+    longer affects any future cost -- so, unlike the return-cost-aware
+    version of this function (see project history), the DP does not
+    need to track WHERE each block started. State drops back to three
+    dimensions instead of four:
+
+    dp[t][k][mask] = min cost of arcs 0..t, ending arc t with vehicle k,
+                     mask = set of vehicles used in arcs 0..t (bit k set).
 
     Returns (None, inf) if infeasible (fewer arcs than vehicles).
     """
@@ -249,20 +291,17 @@ def assign_vehicles_dp(
     K = n_vehicles
     n_masks = 1 << K
     full_mask = n_masks - 1
-    N = edge_costs.shape[1]
 
     if n_arcs < K:
         return None, float('inf')
 
     INF = float('inf')
-    dp = np.full((n_arcs, K, n_masks, N), INF)
-    par_k = np.full((n_arcs, K, n_masks, N), -1, dtype=int)
-    par_mask = np.full((n_arcs, K, n_masks, N), -1, dtype=int)
-    par_origin = np.full((n_arcs, K, n_masks, N), -1, dtype=int)
+    dp = np.full((n_arcs, K, n_masks), INF)
+    par_k = np.full((n_arcs, K, n_masks), -1, dtype=int)
+    par_mask = np.full((n_arcs, K, n_masks), -1, dtype=int)
 
-    start_city = route[0]
     for k in range(K):
-        dp[0, k, 1 << k, start_city] = edge_costs[k, route[0], route[1]]
+        dp[0, k, 1 << k] = edge_costs[k, route[0], route[1]]
 
     for t in range(1, n_arcs):
         src, dst = route[t], route[t + 1]
@@ -275,62 +314,48 @@ def assign_vehicles_dp(
 
                 # Case 1: k already used before -- only valid continuation
                 # is staying on k (no re-entry after a switch away).
-                # Its block's origin carries over unchanged.
-                candidate = dp[t - 1, k, mask, :] + ec
-                better = candidate < dp[t, k, mask, :]
-                if np.any(better):
-                    dp[t, k, mask, better] = candidate[better]
-                    par_k[t, k, mask, better] = k
-                    par_mask[t, k, mask, better] = mask
-                    par_origin[t, k, mask, better] = np.nonzero(better)[0]
+                prev_cost = dp[t - 1, k, mask]
+                if prev_cost != INF:
+                    total = prev_cost + ec
+                    if total < dp[t, k, mask]:
+                        dp[t, k, mask] = total
+                        par_k[t, k, mask] = k
+                        par_mask[t, k, mask] = mask
 
                 # Case 2: k used here for the first time -- opens a brand
-                # new block at city `src`. Whichever vehicle kp was
-                # active closes its block right now and pays its OWN
-                # return cost, from its real origin back to `src`.
+                # new block. Switching is free (return cost = 0), so we
+                # just take whichever previously-active vehicle kp had
+                # the cheapest cost so far.
                 prev_mask = mask ^ bit
                 for kp in range(K):
                     if kp == k:
                         continue
-                    total_row = (
-                        dp[t - 1, kp, prev_mask, :]
-                        + return_costs[kp, :, src]
-                        + ec
-                    )
-                    best_origin_kp = int(np.argmin(total_row))
-                    best_total = total_row[best_origin_kp]
-                    if best_total < dp[t, k, mask, src]:
-                        dp[t, k, mask, src] = best_total
-                        par_k[t, k, mask, src] = kp
-                        par_mask[t, k, mask, src] = prev_mask
-                        par_origin[t, k, mask, src] = best_origin_kp
+                    prev_cost = dp[t - 1, kp, prev_mask]
+                    if prev_cost == INF:
+                        continue
+                    total = prev_cost + ec
+                    if total < dp[t, k, mask]:
+                        dp[t, k, mask] = total
+                        par_k[t, k, mask] = kp
+                        par_mask[t, k, mask] = prev_mask
 
-    # Close the last (still-open) vehicle's block: it must also return
-    # from its own rental origin to the city where the tour ends.
-    end_city = route[-1]
     best_cost = INF
     best_k = -1
-    best_origin = -1
     for k in range(K):
-        row = dp[n_arcs - 1, k, full_mask, :]
-        totals = row + return_costs[k, :, end_city]
-        idx = int(np.argmin(totals))
-        if totals[idx] < best_cost:
-            best_cost = totals[idx]
+        if dp[n_arcs - 1, k, full_mask] < best_cost:
+            best_cost = dp[n_arcs - 1, k, full_mask]
             best_k = k
-            best_origin = idx
 
     if best_k == -1 or best_cost == INF:
         return None, float('inf')
 
     vehicles = [0] * n_arcs
-    k, mask, origin = best_k, full_mask, best_origin
+    k, mask = best_k, full_mask
     vehicles[n_arcs - 1] = k
     for t in range(n_arcs - 1, 0, -1):
-        kp = int(par_k[t, k, mask, origin])
-        pm = int(par_mask[t, k, mask, origin])
-        po = int(par_origin[t, k, mask, origin])
-        k, mask, origin = kp, pm, po
+        kp = int(par_k[t, k, mask])
+        pm = int(par_mask[t, k, mask])
+        k, mask = kp, pm
         vehicles[t - 1] = k
 
     return vehicles, float(best_cost)
@@ -346,8 +371,8 @@ def assign_vehicles_bruteforce(
     to those using all K vehicles AND respecting "sem repeticao" (each
     vehicle in exactly one contiguous block). Only for small n_arcs.
 
-    Cost per combo: arc costs + return_costs[k][origin][dropoff] for
-    EVERY contiguous block (thesis d^k_ij), including the last one."""
+    Return cost treated as 0 (see assign_vehicles_dp) -- cost per combo
+    is just the sum of arc costs."""
     n_arcs = len(route) - 1
     K = n_vehicles
 
@@ -372,16 +397,9 @@ def assign_vehicles_bruteforce(
             continue
 
         total = 0.0
-        block_start_idx = 0
         for t in range(n_arcs):
             i, j, k = route[t], route[t + 1], combo[t]
             total += edge_costs[k, i, j]
-
-            is_last_arc = t == n_arcs - 1
-            switches_next = (not is_last_arc) and combo[t + 1] != k
-            if switches_next or is_last_arc:
-                total += return_costs[k, route[block_start_idx], route[t + 1]]
-                block_start_idx = t + 1
 
         if total < best_cost:
             best_cost = total
@@ -395,39 +413,33 @@ def assign_vehicles_bruteforce(
 # =====================================================
 
 def evaluate(route: List[int], instance: CaRSInstance) -> Solution:
-    """Evaluate a route: find optimal vehicles via DP + compute total cost."""
+    """Evaluate a route: find optimal vehicles via DP (deterministic,
+    still the DP's own objective), then measure the PTSP expected cost
+    of that same (route, vehicles) pair -- expected_cost is what this
+    file's search actually optimizes for; see module docstring."""
     vehicles, cost = assign_vehicles_dp(
         route, instance.edge_costs, instance.return_costs, instance.n_vehicles
     )
     if vehicles is None:
-        return Solution(route, [], float('inf'))
-    return Solution(route, vehicles, cost)
+        return Solution(route, [], float('inf'), float('inf'))
+
+    expected, _, _, _ = expected_cost_ptsp(route, vehicles, instance)
+    return Solution(route, vehicles, cost, expected)
 
 
 def verify_cost(
     sol: Solution, edge_costs: np.ndarray, return_costs: np.ndarray
 ) -> float:
-    """Recompute cost by contiguous vehicle blocks, for manual verification.
-
-    Each block pays edge costs for its arcs plus ONE return cost
-    return_costs[k][origin][dropoff] (thesis d^k_ij) where origin is the
-    city where that block started and dropoff is the city where it ends
-    -- this applies to the LAST block too (return to its own origin,
-    even though the tour physically ends at the depot)."""
+    """Recompute cost as a plain sum of arc costs, for manual
+    verification. Return cost treated as 0 (see assign_vehicles_dp) --
+    `return_costs` is accepted but unused, kept only for a symmetric
+    call signature with the return-cost-aware version."""
     total = 0.0
     n_arcs = len(sol.route) - 1
-    block_start_idx = 0
 
     for t in range(n_arcs):
         i, j, k = sol.route[t], sol.route[t + 1], sol.vehicles[t]
         total += edge_costs[k, i, j]
-
-        is_last_arc = t == n_arcs - 1
-        switches_next = (not is_last_arc) and sol.vehicles[t + 1] != k
-        if switches_next or is_last_arc:
-            origin_city = sol.route[block_start_idx]
-            total += return_costs[k, origin_city, j]
-            block_start_idx = t + 1
 
     return total
 
@@ -435,14 +447,13 @@ def verify_cost(
 def cost_breakdown(
     sol: Solution, edge_costs: np.ndarray, return_costs: np.ndarray
 ) -> float:
-    """Print detailed cost breakdown (per contiguous vehicle block) and
-    return total. See verify_cost() for the block-return-cost model."""
+    """Print detailed cost breakdown (arc costs only -- return cost
+    treated as 0, see assign_vehicles_dp) and return total."""
     total = 0.0
     n_arcs = len(sol.route) - 1
-    block_start_idx = 0
 
     print(f"\n{'=' * 60}")
-    print("  COST BREAKDOWN")
+    print("  COST BREAKDOWN (retorno = 0)")
     print(f"{'=' * 60}")
 
     for t in range(n_arcs):
@@ -450,18 +461,6 @@ def cost_breakdown(
         ec = edge_costs[k, i, j]
         total += ec
         print(f"  Arc {t + 1:2d}: {i:2d} -> {j:2d} | Vehicle {k + 1} | Cost {ec:.2f}")
-
-        is_last_arc = t == n_arcs - 1
-        switches_next = (not is_last_arc) and sol.vehicles[t + 1] != k
-        if switches_next or is_last_arc:
-            origin_city = sol.route[block_start_idx]
-            rc = return_costs[k, origin_city, j]
-            total += rc
-            print(
-                f"         Return vehicle {k + 1} "
-                f"at city {j} -> origin {origin_city} | Cost {rc:.2f}"
-            )
-            block_start_idx = t + 1
 
     print(f"{'─' * 60}")
     print(f"  TOTAL: {total:.2f}")
@@ -524,7 +523,7 @@ def _two_opt_pass(sol: Solution, instance: CaRSInstance) -> Optional[Solution]:
             )
             new_sol = evaluate(new_route, instance)
 
-            if new_sol.cost < sol.cost - 1e-10:
+            if new_sol.expected_cost < sol.expected_cost - 1e-10:
                 return new_sol
 
     return None
@@ -576,7 +575,7 @@ def _or_opt_pass(
                     continue
 
                 new_sol = evaluate(new_route, instance)
-                if new_sol.cost < sol.cost - 1e-10:
+                if new_sol.expected_cost < sol.expected_cost - 1e-10:
                     return new_sol
 
     return None
@@ -595,12 +594,12 @@ def local_search(sol: Solution, instance: CaRSInstance) -> Solution:
         improved = False
 
         after = two_opt(current, instance)
-        if after.cost < current.cost - 1e-10:
+        if after.expected_cost < current.expected_cost - 1e-10:
             current = after
             improved = True
 
         after = or_opt(current, instance)
-        if after.cost < current.cost - 1e-10:
+        if after.expected_cost < current.expected_cost - 1e-10:
             current = after
             improved = True
 
@@ -756,9 +755,9 @@ def _print_expected_cost(sol: Solution, instance: CaRSInstance):
     expected_visited = np.sum(probs)
 
     print(f"\n{'=' * 60}")
-    print("  PTSP EXPECTED COST — vehicle-aware (c_j / c_i, no optimization)")
+    print("  PTSP EXPECTED COST — this is the ACS objective in this file")
     print(f"{'=' * 60}")
-    print(f"  Deterministic cost:   {sol.cost:.2f}")
+    print(f"  Deterministic cost:   {sol.cost:.2f}  (reference only, not optimized)")
     print(
         f"  Expected cost (PTSP): {expected:.2f}  "
         f"(T1={t1:.2f}  T2={t2:.2f}  T3={t3:.2f})"
@@ -797,7 +796,9 @@ def compute_heuristic(instance: CaRSInstance) -> np.ndarray:
 
 
 def nearest_neighbor_cost(instance: CaRSInstance) -> float:
-    """Greedy nearest-neighbor tour cost (for initial pheromone calibration)."""
+    """Greedy nearest-neighbor tour's EXPECTED cost (PTSP), for initial
+    pheromone calibration -- consistent with the expected-cost objective
+    this file actually searches for."""
     min_cost = np.min(instance.edge_costs, axis=0)
     route = [0]
     remaining = set(range(1, instance.n_cities))
@@ -810,8 +811,8 @@ def nearest_neighbor_cost(instance: CaRSInstance) -> float:
         current = nxt
 
     route.append(0)
-    cost = evaluate(route, instance).cost
-    return cost if cost != float('inf') else 1.0
+    expected = evaluate(route, instance).expected_cost
+    return expected if (expected != float('inf') and expected > 0) else 1.0
 
 
 # =====================================================
@@ -862,13 +863,13 @@ class ACS:
         for it in range(self.cfg.n_iterations):
             it_best = self._run_iteration()
 
-            if it_best and (self.best is None or it_best.cost < self.best.cost):
+            if it_best and (self.best is None or it_best.expected_cost < self.best.expected_cost):
                 self.best = it_best.copy()
                 self._last_improvement_iter = it
 
             self._global_pheromone_update()
             self.history.append(
-                self.best.cost if self.best else float("inf")
+                self.best.expected_cost if self.best else float("inf")
             )
 
             if self._is_stagnant(it):
@@ -881,8 +882,8 @@ class ACS:
                 self._last_reset_iter = it
 
             if verbose and (it % 50 == 0 or it == self.cfg.n_iterations - 1):
-                c = f"{self.best.cost:.2f}" if self.best else "N/A"
-                print(f"  Iter {it + 1:4d}/{self.cfg.n_iterations}: Best = {c}")
+                c = f"{self.best.expected_cost:.2f}" if self.best else "N/A"
+                print(f"  Iter {it + 1:4d}/{self.cfg.n_iterations}: Best (expected) = {c}")
 
         if self.best:
             self.best = local_search(self.best, self.inst)
@@ -894,17 +895,18 @@ class ACS:
         return self.best
 
     def _run_iteration(self) -> Optional[Solution]:
-        """Run all ants, return the iteration best (no local search here)."""
+        """Run all ants, return the iteration best by expected cost (no
+        local search here)."""
         it_best: Optional[Solution] = None
 
         for _ in range(self.cfg.n_ants):
             route = self._construct_route()
             sol = evaluate(route, self.inst)
 
-            if sol.cost == float('inf'):
+            if sol.expected_cost == float('inf'):
                 continue
 
-            if it_best is None or sol.cost < it_best.cost:
+            if it_best is None or sol.expected_cost < it_best.expected_cost:
                 it_best = sol
 
         return it_best
@@ -959,18 +961,19 @@ class ACS:
         return int(np.random.choice(cands, p=probs))
 
     def _global_pheromone_update(self):
-        """Evaporate all, deposit on best-so-far, clamp with MMAS bounds."""
+        """Evaporate all, deposit on best-so-far, clamp with MMAS bounds
+        -- all scaled to the EXPECTED cost of the best solution."""
         if self.best is None:
             return
 
         self.pheromone *= 1 - self.cfg.rho
 
-        deposit = self.cfg.rho / self.best.cost
+        deposit = self.cfg.rho / self.best.expected_cost
         route = self.best.route
         for t in range(len(route) - 1):
             self.pheromone[route[t], route[t + 1]] += deposit
 
-        tau_max = 1.0 / (self.cfg.rho * self.best.cost)
+        tau_max = 1.0 / (self.cfg.rho * self.best.expected_cost)
         tau_min = tau_max / (2 * self.N)
         np.clip(self.pheromone, tau_min, tau_max, out=self.pheromone)
 
@@ -985,7 +988,7 @@ class ACS:
     def _print_header(self):
         cfg = self.cfg
         print(f"\n{'=' * 60}")
-        print("  ACS — CaRS (Non-Euclidean, 'exato' + 'sem repeticao')")
+        print("  ACS — CaRS (Non-Euclidean, 'exato' + 'sem repeticao', objetivo: costo esperado PTSP)")
         print(f"{'=' * 60}")
         print(f"  Cities: {self.N}  Vehicles: {self.K}")
         print(f"  Ants: {cfg.n_ants}  Iterations: {cfg.n_iterations}")
@@ -1116,7 +1119,7 @@ def run_experiment(
     _print_instance_info(instance)
 
     best: Optional[Solution] = None
-    costs: List[float] = []
+    expected_costs: List[float] = []
     times: List[float] = []
 
     for run_idx in range(n_runs):
@@ -1145,16 +1148,19 @@ def run_experiment(
             print("  No solution found")
             continue
 
-        costs.append(sol.cost)
-        if best is None or sol.cost < best.cost:
+        expected_costs.append(sol.expected_cost)
+        if best is None or sol.expected_cost < best.expected_cost:
             best = sol.copy()
-            print(f"  NEW BEST: {best.cost:.2f}")
+            print(
+                f"  NEW BEST (expected): {best.expected_cost:.2f}  "
+                f"(deterministic: {best.cost:.2f})"
+            )
 
     if best is None:
         print("\nNo valid solution found")
         return None
 
-    _print_final_results(best, costs, times)
+    _print_final_results(best, expected_costs, times)
     _run_verification(best, instance)
     _run_dp_verification(best, instance)
     _print_expected_cost(best, instance)
@@ -1180,15 +1186,16 @@ def _print_instance_info(instance: CaRSInstance):
 
 
 def _print_final_results(
-    sol: Solution, costs: List[float], times: List[float]
+    sol: Solution, expected_costs: List[float], times: List[float]
 ):
-    """Print final experiment results."""
+    """Print final experiment results (selection metric: expected cost)."""
     n_switches = _count_switches(sol.vehicles)
 
     print(f"\n{'=' * 60}")
-    print("  FINAL RESULT")
+    print("  FINAL RESULT (selected by expected PTSP cost)")
     print(f"{'=' * 60}")
-    print(f"  Cost: {sol.cost:.2f}")
+    print(f"  Expected cost:      {sol.expected_cost:.2f}")
+    print(f"  Deterministic cost: {sol.cost:.2f}  (reference only)")
     print(
         f"  Route: {len(sol.route)} nodes, "
         f"{n_switches} vehicle switches"
@@ -1200,12 +1207,12 @@ def _print_final_results(
             f"| Vehicle {sol.vehicles[t] + 1}"
         )
 
-    if costs:
-        print(f"\n  Statistics over {len(costs)} runs:")
-        print(f"    Best:     {min(costs):.2f}")
-        print(f"    Worst:    {max(costs):.2f}")
-        print(f"    Mean:     {np.mean(costs):.2f}")
-        print(f"    Std:      {np.std(costs):.2f}")
+    if expected_costs:
+        print(f"\n  Statistics over {len(expected_costs)} runs (expected cost):")
+        print(f"    Best:     {min(expected_costs):.2f}")
+        print(f"    Worst:    {max(expected_costs):.2f}")
+        print(f"    Mean:     {np.mean(expected_costs):.2f}")
+        print(f"    Std:      {np.std(expected_costs):.2f}")
         print(f"    Avg time: {np.mean(times):.2f}s")
 
 
