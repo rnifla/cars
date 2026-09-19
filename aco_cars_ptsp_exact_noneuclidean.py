@@ -97,6 +97,18 @@ return cost either, there is no more mismatch between what the DP
 optimizes and what expected_cost_ptsp() measures -- both are now
 consistently "arc costs only".
 
+Matplotlib plot removed, run() added (2026-09, batch benchmarking request)
+--------------------------------------------------------------------------
+`plot_solution()`/`_draw_route()`/`_draw_info()` (and the matplotlib
+import) are gone -- the interactive `plt.show()` blocked execution until
+the window was closed by hand, incompatible with running this file many
+times from run_experiments.py. Added `run(instance_path, seed, verbose)`:
+loads an instance, runs one ACS search, returns a result dict (no
+printing unless verbose=True). `run_experiment()` (the old multi-run+
+stats helper) is kept for manual multi-run comparisons but no longer
+plots. `__main__` now just calls run() once and prints the result plus
+the existing DP/PTSP validations.
+
 Run directly:
     python aco_cars_ptsp_exact_noneuclidean.py
 """
@@ -107,9 +119,6 @@ import time
 import itertools
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 
 
 # =====================================================
@@ -999,91 +1008,6 @@ class ACS:
         print(f"{'=' * 60}")
 
 
-# =====================================================
-# VISUALIZATION
-# =====================================================
-
-def plot_solution(sol: Solution, instance: CaRSInstance):
-    """Show route plot and solution details side by side."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
-    _draw_route(ax1, sol, instance)
-    _draw_info(ax2, sol, instance)
-    plt.tight_layout()
-    plt.show()
-
-
-def _draw_route(ax, sol: Solution, instance: CaRSInstance):
-    """Draw the route on a circular layout with vehicle-colored arcs."""
-    coords = instance.coords
-    colors = [
-        "#FF6B6B", "#4ECDC4", "#45B7D1",
-        "#96CEB4", "#FFEAA7", "#DDA0DD",
-    ]
-
-    ax.scatter(coords[:, 0], coords[:, 1], c="blue", s=80)
-    ax.scatter(
-        coords[0, 0], coords[0, 1],
-        c="red", s=150, marker="s", label="Depot",
-    )
-
-    for t in range(len(sol.route) - 1):
-        i, j = sol.route[t], sol.route[t + 1]
-        color = colors[sol.vehicles[t] % len(colors)]
-        ax.plot(
-            [coords[i, 0], coords[j, 0]],
-            [coords[i, 1], coords[j, 1]],
-            color=color, alpha=0.8, linewidth=3,
-        )
-
-    for idx, (x, y) in enumerate(coords):
-        ax.text(
-            x, y, str(idx), fontsize=12, fontweight="bold",
-            bbox=dict(
-                boxstyle="circle,pad=0.1", facecolor="white", alpha=0.8
-            ),
-        )
-
-    patches = [
-        Patch(facecolor=colors[k % len(colors)], label=f"Vehicle {k + 1}")
-        for k in range(instance.n_vehicles)
-    ]
-    ax.legend(handles=patches, loc="upper right")
-    ax.set_title(
-        f"Route — Cost: {sol.cost:.2f}", fontsize=14, fontweight="bold"
-    )
-    ax.grid(True, alpha=0.3)
-
-
-def _draw_info(ax, sol: Solution, instance: CaRSInstance):
-    """Draw the solution summary panel."""
-    ax.axis("off")
-
-    n_switches = _count_switches(sol.vehicles)
-    route_str = _format_route(sol.route)
-    veh_str = " ".join(str(v + 1) for v in sol.vehicles)
-    expected, _, _, _ = expected_cost_ptsp(sol.route, sol.vehicles, instance)
-
-    text = (
-        f"Route:\n  {route_str}\n\n"
-        f"Vehicles: {veh_str}\n\n"
-        f"Det. Cost:  {sol.cost:.2f}\n"
-        f"PTSP Cost:  {expected:.2f}\n"
-        f"Cities:     {instance.n_cities}\n"
-        f"Arcs:       {len(sol.route) - 1}\n"
-        f"Switches:   {n_switches}"
-    )
-
-    ax.text(
-        0.5, 0.5, text,
-        transform=ax.transAxes, fontsize=11,
-        va="center", ha="center", fontfamily="monospace",
-        bbox=dict(
-            boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8
-        ),
-    )
-    ax.set_title("Solution Details", fontsize=14, fontweight="bold")
-
-
 def _count_switches(vehicles: List[int]) -> int:
     """Count how many times the vehicle changes between consecutive arcs."""
     return sum(
@@ -1092,14 +1016,50 @@ def _count_switches(vehicles: List[int]) -> int:
     )
 
 
-def _format_route(route: List[int], max_per_line: int = 10) -> str:
-    """Format a route into multi-line string for display."""
-    parts = []
-    for i in range(0, len(route), max_per_line):
-        parts.append(
-            " -> ".join(str(n) for n in route[i : i + max_per_line])
-        )
-    return "\n  ".join(parts)
+# =====================================================
+# API PROGRAMATICA -- para uso desde run_experiments.py
+# =====================================================
+
+def run(instance_path: str, seed: int = 42, verbose: bool = False) -> dict:
+    """Carga instance_path, corre UNA busqueda ACS con la semilla dada, sin
+    graficos. No corre las validaciones de fuerza bruta (serian demasiado
+    lentas para correr cientos de veces en batch) -- esas quedan en
+    __main__ para chequeos manuales puntuales.
+
+    Devuelve:
+        {
+            "route": list[int], "vehicles": list[int],
+            "cost": float,            # costo deterministico (referencia)
+            "expected_cost": float,   # costo esperado PTSP (el objetivo)
+            "elapsed_s": float,       # tiempo de la busqueda (ACS + local search)
+            "best_iteration": int,    # iteracion en la que se hallo la mejor solucion
+            "n": int, "k": int,
+        }
+
+    Lanza ValueError si la instancia es infactible para la variante 'exato'
+    (menos arcos que vehiculos).
+    """
+    instance = read_instance(instance_path)
+    config = ACOConfig(seed=seed)
+
+    acs = ACS(instance, config)
+    start = time.time()
+    sol = acs.run(verbose=verbose)
+    elapsed = time.time() - start
+
+    if sol is None:
+        raise ValueError(f"Sin solucion factible (variante 'exato') para {instance_path}")
+
+    return {
+        "route": sol.route,
+        "vehicles": sol.vehicles,
+        "cost": sol.cost,
+        "expected_cost": sol.expected_cost,
+        "elapsed_s": elapsed,
+        "best_iteration": acs._last_improvement_iter,
+        "n": instance.n_cities,
+        "k": instance.n_vehicles,
+    }
 
 
 # =====================================================
@@ -1165,7 +1125,6 @@ def run_experiment(
     _run_dp_verification(best, instance)
     _print_expected_cost(best, instance)
     _run_ptsp_verification(best, instance)
-    plot_solution(best, instance)
 
     return best
 
@@ -1232,16 +1191,31 @@ def _run_verification(sol: Solution, instance: CaRSInstance):
 # =====================================================
 
 if __name__ == "__main__":
-    config = ACOConfig(
-        alpha=1.0,
-        beta=2.5,
-        rho=0.1,
-        q0=0.5,
-        local_rho=0.1,
-        n_ants=20,
-        n_iterations=300,
-        candidate_list_size=10,
-        stagnation_limit=50,
-    )
+    filename = "instances/noneuclidean/BrasilRN16n.car"
 
-    run_experiment("instances/noneuclidean/BrasilRN16n.car", n_runs=2, config=config)
+    result = run(filename, seed=42, verbose=True)
+    route, vehicles = result["route"], result["vehicles"]
+    K = result["k"]
+
+    print(f"\n{'=' * 60}")
+    print("  RESULTADO (seleccionado por costo esperado PTSP)")
+    print(f"{'=' * 60}")
+    print(f"  Costo esperado (PTSP):  {result['expected_cost']:.2f}")
+    print(f"  Costo deterministico:   {result['cost']:.2f}  (referencia, no es el objetivo)")
+    print(f"  Tiempo:                 {result['elapsed_s']:.2f}s")
+    print(f"  Mejor iteracion:        {result['best_iteration']}")
+    print(f"  Vehiculos utilizados: {sorted(set(vehicles))}  (debe ser {list(range(K))}, variante 'exato')")
+
+    for t in range(len(route) - 1):
+        print(f"    {route[t]:3d} -> {route[t + 1]:3d} | Vehiculo {vehicles[t] + 1}")
+
+    # -------------------------------------------------
+    # Validaciones manuales (solo al correr este archivo directo, no en batch)
+    # -------------------------------------------------
+    instance = read_instance(filename)
+    sol = Solution(route, vehicles, result["cost"], result["expected_cost"])
+
+    _run_verification(sol, instance)
+    _run_dp_verification(sol, instance)
+    _print_expected_cost(sol, instance)
+    _run_ptsp_verification(sol, instance)

@@ -8,6 +8,7 @@
 !aco_cars_ptsp_exact_euclidean.py
 !alns_cars_noneuclidean.py
 !alns_cars_euclidean.py
+!run_experiments.py
 
 # ...and the whole instances/ folder (euclidean + noneuclidean .car files).
 !instances/

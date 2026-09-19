@@ -15,22 +15,21 @@ Once a final route is found, each solver also computes the **expected cost under
 |---|---|---|
 | `aco_cars_ptsp_exact_noneuclidean.py` | Ant Colony System (ACS) + 2-opt/Or-opt | Non-Euclidean (explicit cost matrices) |
 | `aco_cars_ptsp_exact_euclidean.py` | Ant Colony System (ACS) + 2-opt/Or-opt | Euclidean (2D coordinates) |
-| `alns_cars_noneuclidean.py` | Adaptive Large Neighborhood Search (ALNS), with Tkinter GUI | Non-Euclidean |
-| `alns_cars_euclidean.py` | Adaptive Large Neighborhood Search (ALNS), with Tkinter GUI | Euclidean |
+| `alns_cars_noneuclidean.py` | Adaptive Large Neighborhood Search (ALNS) | Non-Euclidean |
+| `alns_cars_euclidean.py` | Adaptive Large Neighborhood Search (ALNS) | Euclidean |
 
-The two ACO files run from the command line and print/plot their results. The two ALNS files launch a Tkinter GUI to load an instance, set search parameters, run/pause/stop the search, and export the resulting solution.
+All four files are plain command-line scripts (no GUI, no plots) — each exposes a `run(instance_path, seed=42, verbose=False) -> dict` function (route, vehicles, deterministic cost, expected PTSP cost, elapsed time, best iteration) used both by their own `if __name__ == "__main__":` block and by `run_experiments.py` (see below) for batch benchmarking.
 
 ## Requirements
 
 - Python 3.8+
 - [numpy](https://numpy.org/)
-- [matplotlib](https://matplotlib.org/)
-- `tkinter` (only needed for `alns_cars_noneuclidean.py` / `alns_cars_euclidean.py`) — bundled with the official Python installer on Windows and macOS; on Linux it's usually a separate package, e.g. `sudo apt install python3-tk`.
+- [pandas](https://pandas.pydata.org/) and [openpyxl](https://openpyxl.readthedocs.io/) (only needed for `run_experiments.py`)
 
 Install the Python dependencies with:
 
 ```bash
-pip install numpy matplotlib
+pip install numpy pandas openpyxl
 ```
 
 ## Instance files
@@ -59,4 +58,25 @@ python alns_cars_noneuclidean.py
 python alns_cars_euclidean.py
 ```
 
-The two ACO scripts default to an instance under `instances/` (hardcoded in the `if __name__ == "__main__":` block at the bottom of the file) — edit that line to point at a different `.car` file if you want. The two ALNS scripts prompt you to select an instance file from the GUI, opening directly in the matching `instances/euclidean` or `instances/noneuclidean` folder.
+Each script defaults to one instance under `instances/` (hardcoded in the `if __name__ == "__main__":` block at the bottom of the file) — edit that line to point at a different `.car` file if you want.
+
+## Batch benchmarking
+
+`run_experiments.py` runs all 4 algorithms over a filtered set of instances, several times each, and writes an Excel (`.xlsx`) report:
+
+```bash
+python run_experiments.py --min-n 9 --max-n 17 --runs 10
+python run_experiments.py --min-n 25 --max-n 52 --runs 10
+python run_experiments.py --min-n 70 --max-n 300 --runs 5 --output resultados/grandes.xlsx
+```
+
+- `--min-n` / `--max-n` — only instances whose `DIMENSION` falls in this range (run in size-based blocks to keep individual invocations fast).
+- `--runs` — repetitions per (algorithm, instance) pair; default 10.
+- `--output` — output `.xlsx` path; defaults to an auto-named file under `resultados/`.
+
+The output has two sheets:
+
+- **Resultados** — one row per run: `algoritmo, instancia, N, K, corrida, semilla, tiempo_s, costo_determinista, costo_esperado, iter_mejor`.
+- **Resumen** — one row per (algoritmo, instancia), aggregating the repetitions: `algoritmo, instancia, N, K, corridas, tiempo_prom_s, tiempo_min_s, tiempo_max_s, esperado_prom, esperado_min, esperado_max, esperado_std`.
+
+Selection/optimization in all 4 algorithms is by **expected PTSP cost** (`costo_esperado`); `costo_determinista` is kept only as a reference value.

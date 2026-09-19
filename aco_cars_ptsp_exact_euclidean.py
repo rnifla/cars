@@ -108,6 +108,17 @@ Since return cost is 0 in the DP (see above) and expected_cost_ptsp()
 never modeled return cost anyway, there is no remaining mismatch between
 what the DP measures and what the PTSP formula measures.
 
+Matplotlib plot removed, run() added (2026-09, batch benchmarking request)
+--------------------------------------------------------------------------
+The interactive `plt.show()` plot at the end of `__main__` blocked script
+execution until the window was closed by hand -- incompatible with
+running this file many times in a row from run_experiments.py. Removed
+entirely (not gated -- there is no remaining plotting code in this file).
+Added a `run(instance_path, seed, verbose)` function: loads an instance,
+runs one ACS search, and returns a result dict (no printing unless
+verbose=True) for programmatic/batch use. `__main__` now just calls
+run() once and prints the result plus the existing DP/PTSP validations.
+
 Usage:
     python aco_cars_ptsp_exact_euclidean.py
 """
@@ -119,15 +130,12 @@ import itertools
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
-
 
 # =====================================================
 # LECTURA DE INSTANCIA
 # =====================================================
 
-def read_car_instance(filename):
+def read_car_instance(filename, verbose=True):
     with open(filename, "r") as f:
         lines = [line.strip() for line in f if line.strip()]
 
@@ -187,23 +195,25 @@ def read_car_instance(filename):
                 current.append(row)
         idx += 1
 
-    probabilities = _parse_probabilities(lines, N)
+    probabilities = _parse_probabilities(lines, N, verbose=verbose)
 
     coords = np.array(coords)
     costs = np.array(costs)
     penalty = np.array(penalty)
 
-    print(f"DEBUG: N={N}, K={K}")
+    if verbose:
+        print(f"DEBUG: N={N}, K={K}")
     return N, K, coords, costs, penalty, probabilities
 
 
-def _parse_probabilities(lines, n):
+def _parse_probabilities(lines, n, verbose=True):
     """Read PROBABILITY_SECTION section (P(j) presence probability per city).
     Default to 1.0 for all cities if the section is absent."""
     try:
         idx = lines.index("PROBABILITY_SECTION") + 1
     except ValueError:
-        print("  WARNING: PROBABILITY_SECTION section not found, using P=1.0 for all")
+        if verbose:
+            print("  WARNING: PROBABILITY_SECTION section not found, using P=1.0 for all")
         return np.ones(n)
 
     probs = []
@@ -840,79 +850,87 @@ class ACS:
 
 
 # =====================================================
+# API PROGRAMATICA -- para uso desde run_experiments.py
+# =====================================================
+
+def run(instance_path: str, seed: int = 42, verbose: bool = False) -> dict:
+    """Carga instance_path, corre UNA busqueda ACS con la semilla dada, sin
+    graficos ni ventanas. No corre las validaciones de fuerza bruta (serian
+    demasiado lentas para correr cientos de veces en batch) -- esas quedan
+    solo en __main__ para chequeos manuales puntuales.
+
+    Devuelve:
+        {
+            "route": list[int], "vehicles": list[int],
+            "cost": float,            # costo deterministico (referencia)
+            "expected_cost": float,   # costo esperado PTSP (el objetivo)
+            "elapsed_s": float,       # tiempo de la busqueda (ACS + local search)
+            "best_iteration": int,    # iteracion en la que se hallo la mejor solucion
+            "n": int, "k": int,
+        }
+
+    Lanza ValueError si la instancia es infactible para la variante 'exato'
+    (menos arcos que vehiculos).
+    """
+    N, K, coords, costs, penalty, probabilities = read_car_instance(instance_path, verbose=verbose)
+    inst = build_instance(N, K, coords, costs, penalty, probabilities)
+
+    cfg = ACOConfig(alpha=1.0, beta=2.5, rho=0.1, q0=0.5, local_rho=0.1,
+                     n_ants=30, n_iterations=200, candidate_list_size=10,
+                     stagnation_limit=50, seed=seed)
+
+    acs = ACS(inst, cfg)
+    start = time.time()
+    route, vehicles, cost, expected = acs.run(verbose=verbose)
+    elapsed = time.time() - start
+
+    if route is None or vehicles is None:
+        raise ValueError(f"Sin solucion factible (variante 'exato') para {instance_path}")
+
+    return {
+        "route": route,
+        "vehicles": vehicles,
+        "cost": cost,
+        "expected_cost": expected,
+        "elapsed_s": elapsed,
+        "best_iteration": acs._last_improvement_iter,
+        "n": N,
+        "k": K,
+    }
+
+
+# =====================================================
 # EJECUCION PRINCIPAL
 # =====================================================
 
 if __name__ == "__main__":
     filename = "instances/euclidean/BrasilRJ14e.car"
-    N, K, coords, costs, penalty, probabilities = read_car_instance(filename)
-    inst = build_instance(N, K, coords, costs, penalty, probabilities)
 
-    cfg = ACOConfig(alpha=1.0, beta=2.5, rho=0.1, q0=0.5, local_rho=0.1,
-                     n_ants=30, n_iterations=200, candidate_list_size=10,
-                     stagnation_limit=50)
+    result = run(filename, seed=42, verbose=True)
+    route, vehicles = result["route"], result["vehicles"]
+    K = result["k"]
 
     print("\n" + "=" * 70)
-    print("  EJECUTANDO MULTIPLES VECES")
+    print("  RESULTADO (seleccionado por costo esperado PTSP)")
     print("=" * 70)
-
-    best_overall = float('inf')          # deterministic cost, reference only
-    best_expected_overall = float('inf')  # PTSP expected cost -- selection criterion
-    best_route_overall = None
-    best_vehicles_overall = None
-    all_results = []
-    all_expected = []
-
-    num_runs = 2
-    for run in range(num_runs):
-        print(f"\n--- Ejecucion {run + 1}/{num_runs} ---")
-        acs = ACS(inst, ACOConfig(**{**cfg.__dict__, "seed": run * 1000 + 42}))
-        route, vehicles, cost, expected = acs.run()
-
-        if route is None or vehicles is None:
-            print("  No se encontro solucion valida (exato) para esta corrida")
-            continue
-
-        print(f"  ACS + local search: esperado={expected:.2f}  (deterministico={cost:.2f})")
-
-        if expected < best_expected_overall:
-            best_overall = cost
-            best_expected_overall = expected
-            best_route_overall = route[:]
-            best_vehicles_overall = vehicles[:]
-            print(f"  NUEVO MEJOR (esperado): {best_expected_overall:.2f}")
-
-        all_results.append(cost)
-        all_expected.append(expected)
-
-    if best_route_overall is None:
-        print("\nNo se encontro ninguna solucion valida")
-        raise SystemExit(1)
-
-    print("\n" + "=" * 70)
-    print("  RESULTADO FINAL (seleccionado por costo esperado PTSP)")
-    print("=" * 70)
-    print(f"  Costo esperado (PTSP):  {best_expected_overall:.2f}")
-    print(f"  Costo deterministico:   {best_overall:.2f}  (referencia, no es el objetivo)")
-    print(f"  Longitud ruta: {len(best_route_overall)} nodos")
-    print(f"  Vehiculos utilizados: {sorted(set(best_vehicles_overall))}  (debe ser {list(range(K))}, variante 'exato')")
+    print(f"  Costo esperado (PTSP):  {result['expected_cost']:.2f}")
+    print(f"  Costo deterministico:   {result['cost']:.2f}  (referencia, no es el objetivo)")
+    print(f"  Tiempo:                 {result['elapsed_s']:.2f}s")
+    print(f"  Mejor iteracion:        {result['best_iteration']}")
+    print(f"  Longitud ruta: {len(route)} nodos")
+    print(f"  Vehiculos utilizados: {sorted(set(vehicles))}  (debe ser {list(range(K))}, variante 'exato')")
 
     print("\n  Ruta detallada:")
-    for t in range(len(best_route_overall) - 1):
-        print(f"    {best_route_overall[t]:3d} -> {best_route_overall[t + 1]:3d} | Vehiculo {best_vehicles_overall[t] + 1}")
-
-    if all_expected:
-        print("\n  Estadisticas (costo esperado):")
-        print(f"    Mejor:      {min(all_expected):.2f}")
-        print(f"    Peor:       {max(all_expected):.2f}")
-        print(f"    Promedio:   {np.mean(all_expected):.2f}")
-        print(f"    Desviacion: {np.std(all_expected):.2f}")
-    print("=" * 70)
+    for t in range(len(route) - 1):
+        print(f"    {route[t]:3d} -> {route[t + 1]:3d} | Vehiculo {vehicles[t] + 1}")
 
     # -------------------------------------------------
-    # Verificacion cruzada: DP vs fuerza bruta (si es factible)
+    # Validaciones manuales (solo al correr este archivo directo, no en batch)
     # -------------------------------------------------
-    n_arcs_final = len(best_route_overall) - 1
+    N, K, coords, costs, penalty, probabilities = read_car_instance(filename, verbose=False)
+    inst = build_instance(N, K, coords, costs, penalty, probabilities)
+
+    n_arcs_final = len(route) - 1
     n_combinations = K ** n_arcs_final
     MAX_BRUTEFORCE_COMBINATIONS = 2_000_000
     print("\n" + "=" * 70)
@@ -920,11 +938,11 @@ if __name__ == "__main__":
     print("=" * 70)
     if n_combinations <= MAX_BRUTEFORCE_COMBINATIONS:
         bf_vehicles, bf_cost = assign_vehicles_bruteforce(
-            best_route_overall, inst.edge_costs, inst.return_costs, K
+            route, inst.edge_costs, inst.return_costs, K
         )
-        diff = abs(bf_cost - best_overall)
+        diff = abs(bf_cost - result["cost"])
         tag = "MATCH" if diff < 1e-6 else f"MISMATCH (delta={diff:.6f})"
-        print(f"  DP:            {best_overall:.6f}")
+        print(f"  DP:            {result['cost']:.6f}")
         print(f"  Fuerza bruta:  {bf_cost:.6f}  ({K}^{n_arcs_final} = {n_combinations} combinaciones)")
         print(f"  -> {tag}")
     else:
@@ -932,69 +950,6 @@ if __name__ == "__main__":
               f"por encima del limite de {MAX_BRUTEFORCE_COMBINATIONS})")
     print("=" * 70)
 
-    # -------------------------------------------------
-    # Costo esperado PTSP + verificacion cruzada contra fuerza bruta
-    # -------------------------------------------------
-    expected, t1, t2, t3 = expected_cost_ptsp(best_route_overall, best_vehicles_overall, inst)
-    customers_final = best_route_overall[1:-1]
-    probs_final = inst.probabilities[customers_final]
-    print(f"\n{'=' * 70}")
-    print("  PTSP EXPECTED COST -- vehicle-aware (c_j / c_i, no optimization)")
-    print(f"{'=' * 70}")
-    print(f"  Costo deterministico:  {best_overall:.2f}")
-    print(f"  Costo esperado (PTSP): {expected:.2f}  (T1={t1:.2f}  T2={t2:.2f}  T3={t3:.2f})")
-    print(f"  Clientes esperados:    {np.sum(probs_final):.2f} / {len(customers_final)}")
-    print(f"  Probabilidad promedio: {np.mean(probs_final):.4f}")
-    print(f"{'=' * 70}")
-
-    _run_ptsp_verification(best_route_overall, best_vehicles_overall, inst)
-
-    # -------------------------------------------------
-    # Grafico final
-    # -------------------------------------------------
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
-
-    ax1.scatter(coords[:, 0], coords[:, 1], c='blue', s=80)
-    ax1.scatter(coords[0, 0], coords[0, 1], c='red', s=150, marker='s', label='Deposito')
-
-    colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD']
-    for t in range(len(best_route_overall) - 1):
-        i = best_route_overall[t]
-        j = best_route_overall[t + 1]
-        k = best_vehicles_overall[t] % len(colors)
-        ax1.plot([coords[i, 0], coords[j, 0]], [coords[i, 1], coords[j, 1]],
-                  color=colors[k], alpha=0.8, linewidth=3)
-
-    for i, (x, y) in enumerate(coords):
-        ax1.text(x, y, str(i), fontsize=12, fontweight='bold',
-                  bbox=dict(boxstyle='circle,pad=0.1', facecolor='white', alpha=0.8))
-
-    legend_elements = [Patch(facecolor=colors[k % len(colors)], label=f'Vehiculo {k + 1}') for k in range(K)]
-    ax1.legend(handles=legend_elements, loc='upper right')
-    ax1.set_title(f"Ruta Optima (variante 'exato')\nCosto: {best_overall:.2f}", fontsize=14, fontweight='bold')
-    ax1.set_xlabel("X")
-    ax1.set_ylabel("Y")
-    ax1.grid(True, alpha=0.3)
-
-    ax2.axis('off')
-    nodos = best_route_overall
-    linea1 = " -> ".join(str(n) for n in nodos[:8])
-    linea2 = " -> ".join(str(n) for n in nodos[8:])
-    veh_str = "  ".join(str(v + 1) for v in best_vehicles_overall)
-    texto = (
-        f"RUTA FINAL (variante 'exato')\n\n"
-        f"Ruta:\n  {linea1}\n  {linea2}\n\n"
-        f"Vehiculos por arco:\n  {veh_str}\n\n"
-        f"Costo total:        {best_overall:.2f}\n"
-        f"Nodos:              {len(best_route_overall)}\n"
-        f"Arcos:              {len(best_route_overall) - 1}\n"
-        f"Vehiculos usados:   {sorted(set(best_vehicles_overall))}"
-    )
-    ax2.text(0.5, 0.5, texto, transform=ax2.transAxes, fontsize=11,
-              verticalalignment='center', horizontalalignment='center', fontfamily='monospace')
-    ax2.set_title("Detalle de la Ruta", fontsize=14, fontweight='bold')
-
-    plt.tight_layout()
-    plt.show()
+    _run_ptsp_verification(route, vehicles, inst)
 
     print("\n=== FIN ===")
