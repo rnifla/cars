@@ -620,7 +620,7 @@ def two_opt(route: List[int], inst: EuclideanInstance) -> Tuple[List[int], Optio
         improved = False
         for i in range(1, len(best_route) - 2):
             for j in range(i + 1, len(best_route) - 1):
-                new_route = best_route[:i] + best_route[i:j][::-1] + best_route[j:]
+                new_route = best_route[:i] + best_route[i:j + 1][::-1] + best_route[j + 1:]
                 new_vehicles, new_cost, new_expected = evaluate(new_route, inst)
                 if new_expected < best_expected - 1e-9:
                     best_route, best_vehicles, best_cost, best_expected = new_route, new_vehicles, new_cost, new_expected
@@ -697,8 +697,8 @@ class ACOConfig:
     rho: float = 0.1
     q0: float = 0.5
     local_rho: float = 0.1
-    n_ants: int = 30
-    n_iterations: int = 200
+    n_ants: int = 20
+    n_iterations: int = 300
     candidate_list_size: int = 10
     stagnation_limit: int = 50
     seed: int = 42
@@ -876,7 +876,7 @@ def run(instance_path: str, seed: int = 42, verbose: bool = False) -> dict:
     inst = build_instance(N, K, coords, costs, penalty, probabilities)
 
     cfg = ACOConfig(alpha=1.0, beta=2.5, rho=0.1, q0=0.5, local_rho=0.1,
-                     n_ants=30, n_iterations=200, candidate_list_size=10,
+                     n_ants=20, n_iterations=300, candidate_list_size=10,
                      stagnation_limit=50, seed=seed)
 
     acs = ACS(inst, cfg)
