@@ -270,7 +270,7 @@ class CarRenterProblem:
         if len(segmento) != 2:
             raise ValueError("costo_variable_ruta solo soporta segmentos de 2 ciudades")
         i, j = segmento
-        return self.costo_arco_sin_retorno(i, j, 0)
+        return min(self.costo_arco_sin_retorno(i, j, v) for v in range(self.num_vehiculos))
 
 
 # ------------------------------------------------------------
@@ -509,7 +509,7 @@ class ALNSSolver:
         seed = clientes[seed_idx]
         eliminados = [seed]
         indices_elim = [seed_idx]
-        distancias = [(i, self.problema.dist[seed][c]) for i, c in enumerate(clientes) if i != seed_idx]
+        distancias = [(i, self.problema.costo_variable_ruta([seed, c])) for i, c in enumerate(clientes) if i != seed_idx]
         distancias.sort(key=lambda x: x[1])
         for i, _ in distancias:
             if len(eliminados) >= n:
@@ -605,7 +605,7 @@ class ALNSSolver:
     def reconstruir_greedy_noise(self, ruta_parcial, eliminados):
         ruta = ruta_parcial.copy()
         random.shuffle(eliminados)
-        max_dist = np.max(self.problema.dist)
+        max_val = np.max([self.problema.costo_variable_ruta([0, c]) for c in range(self.problema.n)])
         mu = 0.1
         for cliente in eliminados:
             mejor_pos = 1
@@ -623,7 +623,7 @@ class ALNSSolver:
                     inc = (self.problema.costo_variable_ruta([ruta[pos-1], cliente]) +
                            self.problema.costo_variable_ruta([cliente, ruta[pos]]) -
                            self.problema.costo_variable_ruta([ruta[pos-1], ruta[pos]]))
-                noise = random.uniform(-max_dist*mu, max_dist*mu)
+                noise = random.uniform(-max_val*mu, max_val*mu)
                 if inc + noise < mejor_inc:
                     mejor_inc = inc + noise
                     mejor_pos = pos
